@@ -4,7 +4,8 @@ import hashlib
 import json
 import os
 import stat
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 
 from mini_code_agent.security import SafeWorkspace, SecurityError
@@ -52,9 +53,6 @@ def _descriptor_relative_scanning_available() -> bool:
 class WorkspaceSnapshot:
     root: Path
     files: dict[str, str]
-    _fingerprint: str | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
 
     @classmethod
     def capture(
@@ -64,21 +62,20 @@ class WorkspaceSnapshot:
         ignore_paths: set[Path] | None = None,
         cache: FingerprintCache | None = None,
     ) -> "WorkspaceSnapshot":
-        return WorkspaceFingerprinter(root, cache=cache).capture(
+        snapshot = WorkspaceFingerprinter(root, cache=cache).capture(
             ignore_paths=ignore_paths
         )
+        return cls(root=snapshot.root, files=snapshot.files)
 
-    @property
+    @cached_property
     def fingerprint(self) -> str:
-        if self._fingerprint is None:
-            payload = json.dumps(
-                self.files,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            self._fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        return self._fingerprint
+        payload = json.dumps(
+            self.files,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def diff(self, other: "WorkspaceSnapshot") -> dict[str, list[str]]:
         before = self.files
@@ -412,10 +409,9 @@ class WorkspaceFingerprinter:
             metadata = os.stat("hooks", dir_fd=git_fd, follow_symlinks=False)
         except FileNotFoundError:
             return
+        if stat.S_ISLNK(metadata.st_mode):
+            raise SecurityError(".git/hooks must not be a symbolic link")
         if not stat.S_ISDIR(metadata.st_mode):
-            self._capture_optional_git_entry(
-                git_fd, "hooks", (".git",), files, live_cache_keys
-            )
             return
         hooks_fd = os.open("hooks", _directory_flags(), dir_fd=git_fd)
         try:
@@ -443,10 +439,9 @@ class WorkspaceFingerprinter:
             metadata = os.stat("info", dir_fd=git_fd, follow_symlinks=False)
         except FileNotFoundError:
             return
+        if stat.S_ISLNK(metadata.st_mode):
+            raise SecurityError(".git/info must not be a symbolic link")
         if not stat.S_ISDIR(metadata.st_mode):
-            self._capture_optional_git_entry(
-                git_fd, "info", (".git",), files, live_cache_keys
-            )
             return
         info_fd = os.open("info", _directory_flags(), dir_fd=git_fd)
         try:
@@ -491,9 +486,23 @@ class WorkspaceFingerprinter:
         hooks = git_dir / "hooks"
         if git_dir.is_dir() and not git_dir.is_symlink():
             git_controls.extend([git_dir / "config", git_dir / "config.worktree"])
-            if hooks.is_dir():
+            try:
+                hooks_metadata = hooks.lstat()
+            except FileNotFoundError:
+                hooks_metadata = None
+            if hooks_metadata is not None and stat.S_ISLNK(hooks_metadata.st_mode):
+                raise SecurityError(".git/hooks must not be a symbolic link")
+            if hooks_metadata is not None and stat.S_ISDIR(hooks_metadata.st_mode):
                 git_controls.extend(self.workspace.iter_entries(hooks))
-            git_controls.append(git_dir / "info" / "attributes")
+            info = git_dir / "info"
+            try:
+                info_metadata = info.lstat()
+            except FileNotFoundError:
+                info_metadata = None
+            if info_metadata is not None and stat.S_ISLNK(info_metadata.st_mode):
+                raise SecurityError(".git/info must not be a symbolic link")
+            if info_metadata is not None and stat.S_ISDIR(info_metadata.st_mode):
+                git_controls.append(info / "attributes")
         for path in git_controls:
             try:
                 path.lstat()

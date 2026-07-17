@@ -4,13 +4,14 @@ import hashlib
 import json
 import os
 import stat
+from dataclasses import asdict, fields
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import mini_code_agent.workspace as workspace_module
-from mini_code_agent.security import SafeWorkspace
+from mini_code_agent.security import SafeWorkspace, SecurityError
 from mini_code_agent.verification import capture_workspace_fingerprint
 from mini_code_agent.workspace import WorkspaceSnapshot
 
@@ -32,6 +33,27 @@ def test_lazy_fingerprint_cache_does_not_change_snapshot_equality(tmp_path: Path
     snapshot.fingerprint
 
     assert snapshot == equivalent
+
+
+def test_fingerprint_cache_is_not_a_dataclass_field(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("alpha", encoding="utf-8")
+    snapshot = WorkspaceSnapshot.capture(tmp_path, cache={})
+
+    snapshot.fingerprint
+
+    assert [item.name for item in fields(snapshot)] == ["root", "files"]
+    assert asdict(snapshot) == {"root": snapshot.root, "files": snapshot.files}
+
+
+def test_snapshot_subclass_capture_returns_the_subclass(tmp_path: Path):
+    class CustomWorkspaceSnapshot(WorkspaceSnapshot):
+        pass
+
+    (tmp_path / "a.txt").write_text("alpha", encoding="utf-8")
+
+    snapshot = CustomWorkspaceSnapshot.capture(tmp_path, cache={})
+
+    assert type(snapshot) is CustomWorkspaceSnapshot
 
 
 def test_capture_does_not_resolve_every_regular_file(
@@ -135,6 +157,48 @@ def test_dependency_directories_are_not_skipped(tmp_path: Path):
 
     assert ".venv/site-packages/installed.py" in snapshot.files
     assert "node_modules/dependency/index.js" in snapshot.files
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative scanner is POSIX-only")
+def test_non_directory_git_controls_match_fallback(tmp_path: Path):
+    if not workspace_module._descriptor_relative_scanning_available():
+        pytest.skip("descriptor-relative operations are unavailable")
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "hooks").write_text("not a directory\n", encoding="utf-8")
+    (git_dir / "info").write_text("not a directory\n", encoding="utf-8")
+
+    descriptor = workspace_module.WorkspaceFingerprinter(tmp_path)
+    descriptor._use_descriptor_relative_scanner = True
+    fallback = workspace_module.WorkspaceFingerprinter(tmp_path)
+    fallback._use_descriptor_relative_scanner = False
+
+    descriptor_snapshot = descriptor.capture()
+    fallback_snapshot = fallback.capture()
+
+    assert descriptor_snapshot.files == fallback_snapshot.files
+    assert ".git/hooks" not in descriptor_snapshot.files
+    assert ".git/info" not in descriptor_snapshot.files
+
+
+@pytest.mark.parametrize("use_descriptor", [True, False], ids=["descriptor", "fallback"])
+@pytest.mark.parametrize("control_name", ["hooks", "info"])
+def test_symlinked_git_control_directories_fail_closed(
+    tmp_path: Path, use_descriptor: bool, control_name: str
+):
+    if use_descriptor and not workspace_module._descriptor_relative_scanning_available():
+        pytest.skip("descriptor-relative operations are unavailable")
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir()
+    try:
+        (git_dir / control_name).symlink_to("missing-control-target")
+    except OSError:
+        pytest.skip("symlinks are unavailable on this platform")
+    fingerprinter = workspace_module.WorkspaceFingerprinter(tmp_path)
+    fingerprinter._use_descriptor_relative_scanner = use_descriptor
+
+    with pytest.raises(SecurityError, match=rf"\.git/{control_name}"):
+        fingerprinter.capture()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="descriptor-relative scanner is POSIX-only")
