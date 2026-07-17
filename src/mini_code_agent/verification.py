@@ -41,11 +41,14 @@ def capture_workspace_fingerprint(
             value = native()
         if isinstance(value, str):
             return value
+        fingerprint = getattr(value, "fingerprint", None)
+        if isinstance(fingerprint, str):
+            return fingerprint
         files = getattr(value, "files", None)
         if isinstance(files, dict):
             return _fingerprint_files(files)
     snapshot = WorkspaceSnapshot.capture(executor.cwd, ignore_paths=ignore_paths or set())
-    return _fingerprint_files(snapshot.files)
+    return snapshot.fingerprint
 
 
 @dataclass

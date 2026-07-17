@@ -22,6 +22,7 @@ from typing import Any, Literal
 from mini_code_agent.contracts import ToolResult
 from mini_code_agent.security import SafeWorkspace, SecretRedactor
 from mini_code_agent.utils import DEFAULT_OUTPUT_LIMIT, truncate_text
+from mini_code_agent.workspace import WorkspaceFingerprinter
 
 DEFAULT_TEST_COMMAND = "python3 -m unittest discover -v"
 MAX_COMMAND_OUTPUT_BYTES = 2 * 1024 * 1024
@@ -148,7 +149,7 @@ class BashExecutor:
         self.env = env or {}
         self.redactor = redactor or SecretRedactor()
         self._git_executable = self._trusted_executable("git")
-        self._fingerprint_cache: dict[str, tuple[tuple[int, ...], str]] = {}
+        self._workspace_fingerprinter = WorkspaceFingerprinter(self.cwd)
         self._runtime_directory = tempfile.TemporaryDirectory(prefix="mini-code-agent-")
         self._runtime_root = Path(self._runtime_directory.name)
         (self._runtime_root / "home").mkdir(mode=0o700)
@@ -158,12 +159,8 @@ class BashExecutor:
     def workspace_fingerprint(self, *, ignore_paths: set[Path] | None = None):
         """Capture a cached, metadata-aware workspace snapshot."""
 
-        from mini_code_agent.workspace import WorkspaceSnapshot
-
-        return WorkspaceSnapshot.capture(
-            self.cwd,
-            ignore_paths=ignore_paths or set(),
-            cache=self._fingerprint_cache,
+        return self._workspace_fingerprinter.capture(
+            ignore_paths=ignore_paths or set()
         )
 
     def execute_tool(self, name: str, args: dict[str, Any]) -> ToolResult:
