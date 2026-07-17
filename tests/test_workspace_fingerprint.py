@@ -76,15 +76,36 @@ def test_capture_does_not_resolve_every_regular_file(
     assert calls <= 4
 
 
-def test_warm_cache_returns_the_same_fingerprint(tmp_path: Path):
-    (tmp_path / "source.py").write_text("print('hello')\n", encoding="utf-8")
+def test_warm_cache_skips_unchanged_hashes_and_rehashes_only_changed_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "source.py"
+    unchanged = tmp_path / "unchanged.py"
+    source.write_text("print('hello')\n", encoding="utf-8")
+    unchanged.write_text("constant\n", encoding="utf-8")
     fingerprinter = workspace_module.WorkspaceFingerprinter(tmp_path)
+    original_hash = workspace_module._hash_file_descriptor
+    hashed_inodes: list[int] = []
+
+    def counted_hash(file_fd: int) -> str:
+        hashed_inodes.append(os.fstat(file_fd).st_ino)
+        return original_hash(file_fd)
+
+    monkeypatch.setattr(workspace_module, "_hash_file_descriptor", counted_hash)
 
     cold = fingerprinter.capture()
+    cold_hashes = list(hashed_inodes)
     warm = fingerprinter.capture()
 
     assert warm.fingerprint == cold.fingerprint
     assert warm.files == cold.files
+    assert set(cold_hashes) == {source.stat().st_ino, unchanged.stat().st_ino}
+    assert hashed_inodes == cold_hashes
+
+    source.write_text("print('changed and larger')\n", encoding="utf-8")
+    fingerprinter.capture()
+
+    assert hashed_inodes[len(cold_hashes) :] == [source.stat().st_ino]
 
 
 def test_changing_one_file_changes_the_fingerprint(tmp_path: Path):
@@ -157,6 +178,226 @@ def test_dependency_directories_are_not_skipped(tmp_path: Path):
 
     assert ".venv/site-packages/installed.py" in snapshot.files
     assert "node_modules/dependency/index.js" in snapshot.files
+
+
+def _descriptor_fingerprinter(tmp_path: Path):
+    if not workspace_module._descriptor_relative_scanning_available():
+        pytest.skip("descriptor-relative operations are unavailable")
+    fingerprinter = workspace_module.WorkspaceFingerprinter(tmp_path)
+    fingerprinter._use_descriptor_relative_scanner = True
+    return fingerprinter
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative scanner is POSIX-only")
+def test_descriptor_entry_removed_after_enumeration_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (tmp_path / "vanishing.txt").write_text("content\n", encoding="utf-8")
+    fingerprinter = _descriptor_fingerprinter(tmp_path)
+    original_stat = os.stat
+
+    def missing_stat(path, *args, **kwargs):
+        if (
+            path == "vanishing.txt"
+            and kwargs.get("dir_fd") is not None
+            and kwargs.get("follow_symlinks") is False
+        ):
+            (tmp_path / "vanishing.txt").unlink()
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_module.os, "stat", missing_stat)
+
+    snapshot = fingerprinter.capture()
+
+    assert snapshot.files["vanishing.txt"] == "unreadable"
+    assert "vanishing.txt" not in fingerprinter.cache
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative scanner is POSIX-only")
+@pytest.mark.parametrize("failure_point", ["open", "read"])
+def test_descriptor_regular_file_io_errors_are_unreadable_and_close_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_point: str
+):
+    blocked = tmp_path / "blocked.txt"
+    blocked.write_text("content\n", encoding="utf-8")
+    mode = stat.S_IMODE(blocked.stat().st_mode)
+    blocked_inode = blocked.stat().st_ino
+    fingerprinter = _descriptor_fingerprinter(tmp_path)
+    original_open = os.open
+    original_close = os.close
+    original_read = os.read
+    opened: set[int] = set()
+
+    def tracked_open(path, flags, *args, **kwargs):
+        if (
+            failure_point == "open"
+            and path == "blocked.txt"
+            and kwargs.get("dir_fd") is not None
+        ):
+            raise PermissionError("forced file open failure")
+        descriptor = original_open(path, flags, *args, **kwargs)
+        opened.add(descriptor)
+        return descriptor
+
+    def tracked_close(descriptor):
+        opened.discard(descriptor)
+        return original_close(descriptor)
+
+    def failing_read(descriptor, size):
+        if (
+            failure_point == "read"
+            and descriptor in opened
+            and os.fstat(descriptor).st_ino == blocked_inode
+        ):
+            raise PermissionError("forced file read failure")
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(workspace_module.os, "open", tracked_open)
+    monkeypatch.setattr(workspace_module.os, "close", tracked_close)
+    monkeypatch.setattr(workspace_module.os, "read", failing_read)
+
+    snapshot = fingerprinter.capture()
+
+    marker = f"file:{mode:o}:unreadable"
+    assert snapshot.files["blocked.txt"] == marker
+    assert fingerprinter.cache["blocked.txt"][1] == marker
+    assert opened == set()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative scanner is POSIX-only")
+def test_descriptor_symlink_readlink_error_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    link = tmp_path / "current"
+    try:
+        link.symlink_to("missing-target")
+    except OSError:
+        pytest.skip("symlinks are unavailable on this platform")
+    mode = stat.S_IMODE(link.lstat().st_mode)
+    fingerprinter = _descriptor_fingerprinter(tmp_path)
+    original_readlink = os.readlink
+
+    def failing_readlink(path, *args, **kwargs):
+        if path == "current" and kwargs.get("dir_fd") is not None:
+            raise PermissionError("forced readlink failure")
+        return original_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_module.os, "readlink", failing_readlink)
+
+    snapshot = fingerprinter.capture()
+
+    marker = f"symlink:{mode:o}:unreadable"
+    assert snapshot.files["current"] == marker
+    assert fingerprinter.cache["current"][1] == marker
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative scanner is POSIX-only")
+def test_descriptor_unreadable_directory_keeps_marker_and_closes_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (blocked / "nested.txt").write_text("content\n", encoding="utf-8")
+    mode = stat.S_IMODE(blocked.stat().st_mode)
+    fingerprinter = _descriptor_fingerprinter(tmp_path)
+    original_open = os.open
+    original_close = os.close
+    opened: set[int] = set()
+
+    def tracked_open(path, flags, *args, **kwargs):
+        if path == "blocked" and kwargs.get("dir_fd") is not None:
+            raise PermissionError("forced directory open failure")
+        descriptor = original_open(path, flags, *args, **kwargs)
+        opened.add(descriptor)
+        return descriptor
+
+    def tracked_close(descriptor):
+        opened.discard(descriptor)
+        return original_close(descriptor)
+
+    monkeypatch.setattr(workspace_module.os, "open", tracked_open)
+    monkeypatch.setattr(workspace_module.os, "close", tracked_close)
+
+    snapshot = fingerprinter.capture()
+
+    marker = f"directory:{mode:o}"
+    assert snapshot.files["blocked"] == marker
+    assert "blocked/nested.txt" not in snapshot.files
+    assert fingerprinter.cache["blocked"][1] == marker
+    assert opened == set()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative scanner is POSIX-only")
+def test_descriptor_open_failure_that_became_symlink_fails_closed_and_closes_fds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    race = tmp_path / "race.txt"
+    target = tmp_path / "target.txt"
+    race.write_text("before\n", encoding="utf-8")
+    target.write_text("target\n", encoding="utf-8")
+    fingerprinter = _descriptor_fingerprinter(tmp_path)
+    original_open = os.open
+    original_close = os.close
+    opened: set[int] = set()
+    switched = False
+
+    def racing_open(path, flags, *args, **kwargs):
+        nonlocal switched
+        if (
+            not switched
+            and path == "race.txt"
+            and kwargs.get("dir_fd") is not None
+        ):
+            switched = True
+            race.unlink()
+            try:
+                race.symlink_to(target.name)
+            except OSError:
+                pytest.skip("symlinks are unavailable on this platform")
+        descriptor = original_open(path, flags, *args, **kwargs)
+        opened.add(descriptor)
+        return descriptor
+
+    def tracked_close(descriptor):
+        opened.discard(descriptor)
+        return original_close(descriptor)
+
+    monkeypatch.setattr(workspace_module.os, "open", racing_open)
+    monkeypatch.setattr(workspace_module.os, "close", tracked_close)
+
+    with pytest.raises(SecurityError, match="race.txt"):
+        fingerprinter.capture()
+
+    assert opened == set()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative scanner is POSIX-only")
+def test_descriptor_root_metadata_failure_remains_fail_closed_with_unreadable_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (tmp_path / "blocked.txt").write_text("content\n", encoding="utf-8")
+    fingerprinter = _descriptor_fingerprinter(tmp_path)
+    original_stat = os.stat
+    original_fstat = os.fstat
+    root_fstats = 0
+
+    def failing_stat(path, *args, **kwargs):
+        if path == "blocked.txt" and kwargs.get("dir_fd") is not None:
+            raise PermissionError("forced entry stat failure")
+        return original_stat(path, *args, **kwargs)
+
+    def failing_final_root_fstat(descriptor):
+        nonlocal root_fstats
+        root_fstats += 1
+        if root_fstats == 3:
+            raise OSError("forced root metadata failure")
+        return original_fstat(descriptor)
+
+    monkeypatch.setattr(workspace_module.os, "stat", failing_stat)
+    monkeypatch.setattr(workspace_module.os, "fstat", failing_final_root_fstat)
+
+    with pytest.raises(OSError, match="forced root metadata failure"):
+        fingerprinter.capture()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="descriptor-relative scanner is POSIX-only")

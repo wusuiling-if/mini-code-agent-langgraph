@@ -13,6 +13,7 @@ import mini_code_agent.cli as cli_module
 import mini_code_agent.executor as executor_module
 import mini_code_agent.trajectory as trajectory_module
 import mini_code_agent.utils as utils_module
+import mini_code_agent.verification as verification_module
 from mini_code_agent.agent import (
     MiniCodeAgent,
     VerificationGate,
@@ -275,17 +276,19 @@ class TwoToolModel:
 def test_batch_fingerprint_error_still_pairs_every_tool_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    original = agent_module.capture_workspace_fingerprint
+    original = verification_module.capture_workspace_fingerprint
     calls = 0
 
     def flaky_capture(*args, **kwargs):
         nonlocal calls
         calls += 1
-        if calls == 2:
+        if calls == 1:
             raise RuntimeError("injected fingerprint failure")
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(agent_module, "capture_workspace_fingerprint", flaky_capture)
+    monkeypatch.setattr(
+        verification_module, "capture_workspace_fingerprint", flaky_capture
+    )
     session = ConversationalCodeAgent(
         TwoToolModel(),
         BashExecutor(tmp_path, approval_mode="yolo", sandbox_mode="none"),
@@ -295,10 +298,15 @@ def test_batch_fingerprint_error_still_pairs_every_tool_call(
 
     result = session.respond_turn("inspect")
     tool_messages = [message for message in session.messages if message.type == "tool"]
+    observations = [json.loads(str(message.content)) for message in tool_messages]
 
     assert not result.completed
     assert len(tool_messages) == 2
     assert {message.tool_call_id for message in tool_messages} == {"list-1", "read-1"}
+    assert [observation["exception_info"] for observation in observations] == [
+        "WorkspaceFingerprintError",
+        "WorkspaceFingerprintError",
+    ]
 
 
 def test_ask_mode_is_a_read_only_allowlist(tmp_path: Path):

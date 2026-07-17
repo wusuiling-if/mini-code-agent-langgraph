@@ -29,8 +29,12 @@ from mini_code_agent.context import (
     compact_messages,
     limit_model_tool_calls,
 )
-from mini_code_agent.contracts import ExecutedToolCall, ToolBatchOutcome, ToolResult
-from mini_code_agent.executor import BashExecutor
+from mini_code_agent.contracts import (
+    ExecutedToolCall,
+    ToolBatchOutcome,
+    ToolExecutor,
+    ToolResult,
+)
 from mini_code_agent.model import ALL_TOOLS
 from mini_code_agent.prompts import SYSTEM_PROMPT
 from mini_code_agent.trajectory import load_authenticated_undo_records, write_undo_journal
@@ -66,7 +70,7 @@ class MiniCodeAgent:
     def __init__(
         self,
         model,
-        executor: BashExecutor,
+        executor: ToolExecutor,
         *,
         max_steps: int = 50,
         context_char_budget: int = 60_000,

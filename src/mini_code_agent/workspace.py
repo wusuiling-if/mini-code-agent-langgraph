@@ -155,7 +155,7 @@ class WorkspaceFingerprinter:
             if not stat.S_ISDIR(root_metadata.st_mode):
                 raise NotADirectoryError(self.root)
             root_signature = _metadata_signature(root_metadata)
-            self._scan_directory(
+            unreadable_entry = self._scan_directory(
                 root_fd,
                 (),
                 files,
@@ -165,7 +165,11 @@ class WorkspaceFingerprinter:
                 skip_dir_names=SKIP_DIRS,
             )
             self._capture_git_controls(root_fd, files, live_cache_keys)
-            if _metadata_signature(os.fstat(root_fd)) != root_signature:
+            final_root_signature = _metadata_signature(os.fstat(root_fd))
+            if (
+                not unreadable_entry
+                and final_root_signature != root_signature
+            ):
                 raise OSError("workspace root changed while fingerprinting")
         finally:
             os.close(root_fd)
@@ -180,15 +184,16 @@ class WorkspaceFingerprinter:
         ignored_ancestors: set[str],
         *,
         skip_dir_names: set[str],
-    ) -> None:
+    ) -> bool:
         directory_metadata = os.fstat(directory_fd)
         if not stat.S_ISDIR(directory_metadata.st_mode):
             raise NotADirectoryError(_relative_name(relative_parts))
         directory_signature = _metadata_signature(directory_metadata)
         with os.scandir(directory_fd) as entries:
             names = sorted(entry.name for entry in entries)
+        unreadable_entry = False
         for name in names:
-            self._capture_named_entry(
+            unreadable_entry = self._capture_named_entry(
                 directory_fd,
                 name,
                 relative_parts,
@@ -198,10 +203,12 @@ class WorkspaceFingerprinter:
                 ignored_ancestors,
                 recurse_directories=True,
                 skip_dir_names=skip_dir_names,
-            )
-        if _metadata_signature(os.fstat(directory_fd)) != directory_signature:
+            ) or unreadable_entry
+        final_directory_signature = _metadata_signature(os.fstat(directory_fd))
+        if not unreadable_entry and final_directory_signature != directory_signature:
             display = _relative_name(relative_parts) or "."
             raise OSError(f"directory changed while fingerprinting: {display}")
+        return unreadable_entry
 
     def _capture_named_entry(
         self,
@@ -215,15 +222,24 @@ class WorkspaceFingerprinter:
         *,
         recurse_directories: bool,
         skip_dir_names: set[str],
-    ) -> None:
-        metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        enumerated: bool = True,
+    ) -> bool:
         relative_parts = (*parent_parts, name)
         relative = _relative_name(relative_parts)
         excluded = relative in ignored or relative in ignored_ancestors
+        try:
+            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            if not enumerated:
+                raise
+            if not excluded:
+                live_cache_keys.add(relative)
+                files[relative] = "unreadable"
+            return True
 
         if stat.S_ISLNK(metadata.st_mode):
             if not excluded:
-                self._store_metadata_entry(
+                return self._store_metadata_entry(
                     parent_fd,
                     name,
                     relative,
@@ -231,12 +247,25 @@ class WorkspaceFingerprinter:
                     files,
                     live_cache_keys,
                 )
-            return
+            return False
 
         if stat.S_ISDIR(metadata.st_mode):
             if name in skip_dir_names:
-                return
-            child_fd = os.open(name, _directory_flags(), dir_fd=parent_fd)
+                return False
+            try:
+                child_fd = os.open(name, _directory_flags(), dir_fd=parent_fd)
+            except OSError:
+                self._raise_if_symlink_after_open_failure(parent_fd, name, relative)
+                if not excluded:
+                    self._store_metadata_entry(
+                        parent_fd,
+                        name,
+                        relative,
+                        metadata,
+                        files,
+                        live_cache_keys,
+                    )
+                return True
             try:
                 child_metadata = os.fstat(child_fd)
                 if not stat.S_ISDIR(child_metadata.st_mode):
@@ -253,7 +282,7 @@ class WorkspaceFingerprinter:
                         live_cache_keys,
                     )
                 if recurse_directories:
-                    self._scan_directory(
+                    return self._scan_directory(
                         child_fd,
                         relative_parts,
                         files,
@@ -264,19 +293,26 @@ class WorkspaceFingerprinter:
                     )
             finally:
                 os.close(child_fd)
-            return
+            return False
 
         if stat.S_ISREG(metadata.st_mode):
             if excluded:
-                return
-            file_fd = os.open(name, _file_flags(), dir_fd=parent_fd)
+                return False
+            try:
+                file_fd = os.open(name, _file_flags(), dir_fd=parent_fd)
+            except OSError:
+                self._raise_if_symlink_after_open_failure(parent_fd, name, relative)
+                self._store_unreadable_regular_file(
+                    relative, metadata, files, live_cache_keys
+                )
+                return True
             try:
                 file_metadata = os.fstat(file_fd)
                 if not stat.S_ISREG(file_metadata.st_mode):
                     raise SecurityError(
                         f"file entry changed while fingerprinting: {relative}"
                     )
-                self._store_regular_file(
+                return self._store_regular_file(
                     file_fd,
                     relative,
                     file_metadata,
@@ -285,10 +321,9 @@ class WorkspaceFingerprinter:
                 )
             finally:
                 os.close(file_fd)
-            return
 
         if not excluded:
-            self._store_metadata_entry(
+            return self._store_metadata_entry(
                 parent_fd,
                 name,
                 relative,
@@ -296,6 +331,7 @@ class WorkspaceFingerprinter:
                 files,
                 live_cache_keys,
             )
+        return False
 
     def _store_metadata_entry(
         self,
@@ -305,23 +341,30 @@ class WorkspaceFingerprinter:
         metadata: os.stat_result,
         files: dict[str, str],
         live_cache_keys: set[str],
-    ) -> None:
+    ) -> bool:
         live_cache_keys.add(relative)
         signature = _metadata_signature(metadata)
         cached = self.cache.get(relative)
         if cached is not None and cached[0] == signature:
             files[relative] = cached[1]
-            return
+            return False
 
         mode = stat.S_IMODE(metadata.st_mode)
+        unreadable = False
         if stat.S_ISLNK(metadata.st_mode):
-            value = f"symlink:{mode:o}:{os.readlink(name, dir_fd=parent_fd)}"
+            try:
+                target = os.readlink(name, dir_fd=parent_fd)
+            except OSError:
+                target = "unreadable"
+                unreadable = True
+            value = f"symlink:{mode:o}:{target}"
         elif stat.S_ISDIR(metadata.st_mode):
             value = f"directory:{mode:o}"
         else:
             value = f"special:{stat.S_IFMT(metadata.st_mode):o}:{mode:o}"
         self.cache[relative] = (signature, value)
         files[relative] = value
+        return unreadable
 
     def _store_regular_file(
         self,
@@ -330,21 +373,55 @@ class WorkspaceFingerprinter:
         metadata: os.stat_result,
         files: dict[str, str],
         live_cache_keys: set[str],
-    ) -> None:
+    ) -> bool:
         live_cache_keys.add(relative)
         signature = _metadata_signature(metadata)
         cached = self.cache.get(relative)
         if cached is not None and cached[0] == signature:
             files[relative] = cached[1]
-            return
+            return False
 
-        digest = _hash_file_descriptor(file_fd)
+        try:
+            digest = _hash_file_descriptor(file_fd)
+        except OSError:
+            self._store_unreadable_regular_file(
+                relative, metadata, files, live_cache_keys
+            )
+            return True
         if _metadata_signature(os.fstat(file_fd)) != signature:
             raise OSError(f"file changed while fingerprinting: {relative}")
         mode = stat.S_IMODE(metadata.st_mode)
         value = f"file:{mode:o}:{digest}"
         self.cache[relative] = (signature, value)
         files[relative] = value
+        return False
+
+    def _store_unreadable_regular_file(
+        self,
+        relative: str,
+        metadata: os.stat_result,
+        files: dict[str, str],
+        live_cache_keys: set[str],
+    ) -> None:
+        signature = _metadata_signature(metadata)
+        mode = stat.S_IMODE(metadata.st_mode)
+        value = f"file:{mode:o}:unreadable"
+        live_cache_keys.add(relative)
+        self.cache[relative] = (signature, value)
+        files[relative] = value
+
+    @staticmethod
+    def _raise_if_symlink_after_open_failure(
+        parent_fd: int, name: str, relative: str
+    ) -> None:
+        try:
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            return
+        if stat.S_ISLNK(current.st_mode):
+            raise SecurityError(
+                f"entry changed to a symbolic link while fingerprinting: {relative}"
+            )
 
     def _capture_git_controls(
         self,
@@ -395,6 +472,7 @@ class WorkspaceFingerprinter:
                 set(),
                 recurse_directories=False,
                 skip_dir_names=set(),
+                enumerated=False,
             )
         except FileNotFoundError:
             return
