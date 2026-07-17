@@ -30,7 +30,12 @@ def test_bash_disabled_by_default_and_dangerous_shell_blocked_when_enabled(tmp_p
 
 
 def test_run_tests_uses_configured_command_only_without_shell_permission(tmp_path: Path):
-    executor = BashExecutor(tmp_path, approval_mode="yolo", default_test_command="python3 -c 'print(123)'")
+    executor = BashExecutor(
+        tmp_path,
+        approval_mode="yolo",
+        default_test_command="python3 -c 'print(123)'",
+        sandbox_mode="none",
+    )
 
     custom = executor.execute_tool("run_tests", {"command": "echo custom"})
     assert custom.blocked
@@ -61,3 +66,8 @@ def test_apply_patch_replace_lines_and_write_file_return_diffs(tmp_path: Path):
     write = executor.execute_tool("write_file", {"path": "new.txt", "content": "hello\n"})
     assert write.returncode == 0
     assert "+hello" in write.output
+
+
+def test_sandbox_probe_reports_explicitly_disabled_mode_as_usable(tmp_path: Path):
+    executor = BashExecutor(tmp_path, approval_mode="yolo", sandbox_mode="none")
+    assert executor.sandbox_probe() == (True, "disabled")

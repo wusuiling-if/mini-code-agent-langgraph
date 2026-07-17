@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import math
 import os
+from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatResult
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 MODEL_ALIASES = {
@@ -12,11 +14,12 @@ MODEL_ALIASES = {
     "deepseek-flash": "deepseek-v4-flash",
     "deepseek-pro": "deepseek-v4-pro",
 }
+Provider = Literal["auto", "deepseek", "openai"]
 
 
 @tool
 def bash(command: str) -> str:
-    """Advanced escape hatch for shell commands. Disabled by default except final submission."""
+    """Advanced escape hatch for shell commands. Disabled by default."""
     raise RuntimeError("The LangGraph tools node executes bash calls.")
 
 
@@ -63,8 +66,8 @@ def git_diff(path: str = "") -> str:
 
 
 @tool
-def run_tests(command: str = "python3 -m unittest discover -v") -> str:
-    """Run the repository test command in the project directory."""
+def run_tests() -> str:
+    """Run the user-configured repository test command in the project directory."""
     raise RuntimeError("The LangGraph tools node executes run_tests calls.")
 
 
@@ -114,7 +117,7 @@ class MockCodingModel:
                 tool_calls=[
                     {
                         "name": "run_tests",
-                        "args": {"command": "python3 -m unittest discover -v"},
+                        "args": {},
                         "id": "mock-call-2",
                         "type": "tool_call",
                     }
@@ -150,7 +153,7 @@ class MockCodingModel:
                 tool_calls=[
                     {
                         "name": "run_tests",
-                        "args": {"command": "python3 -m unittest discover -v"},
+                        "args": {},
                         "id": "mock-call-5",
                         "type": "tool_call",
                     },
@@ -175,26 +178,143 @@ class MockCodingModel:
         )
 
 
+class _DeepSeekToolChatMixin:
+    """DeepSeek adapter that round-trips thinking-mode tool-call context.
+
+    DeepSeek requires ``reasoning_content`` from assistant tool-call messages to
+    be sent back on later requests. ``ChatDeepSeek`` extracts the field from
+    responses, while this small adapter also restores it in request payloads.
+    """
+
+    def _get_request_payload(
+        self,
+        input_: Any,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        source_messages = self._convert_input(input_).to_messages()
+        wire_messages = payload.get("messages", [])
+        for source, wire in zip(source_messages, wire_messages):
+            if not isinstance(source, AIMessage) or wire.get("role") != "assistant":
+                continue
+            reasoning_content = source.additional_kwargs.get("reasoning_content")
+            if reasoning_content is not None:
+                wire["reasoning_content"] = reasoning_content
+            # DeepSeek requires assistant content to be present during tool loops.
+            if wire.get("tool_calls") and wire.get("content") is None:
+                wire["content"] = ""
+        return payload
+
+    def _create_chat_result(
+        self,
+        response: dict[str, Any] | Any,
+        generation_info: dict[str, Any] | None = None,
+    ) -> ChatResult:
+        result = super()._create_chat_result(response, generation_info)
+        # The upstream adapter handles SDK response models. Keep dict responses
+        # (used by some compatible transports and tests) lossless as well.
+        if isinstance(response, dict):
+            choices = response.get("choices") or []
+            if choices:
+                raw_message = choices[0].get("message") or {}
+                if "reasoning_content" in raw_message:
+                    result.generations[0].message.additional_kwargs["reasoning_content"] = (
+                        raw_message["reasoning_content"]
+                    )
+        return result
+
+
+_DEEPSEEK_MODEL_CLASS = None
+
+
+def _deepseek_model_class():
+    """Create the DeepSeek adapter class only when that provider is selected."""
+
+    global _DEEPSEEK_MODEL_CLASS
+    if _DEEPSEEK_MODEL_CLASS is None:
+        from langchain_deepseek import ChatDeepSeek
+
+        class DeepSeekToolChatModel(_DeepSeekToolChatMixin, ChatDeepSeek):
+            pass
+
+        _DEEPSEEK_MODEL_CLASS = DeepSeekToolChatModel
+    return _DEEPSEEK_MODEL_CLASS
+
+
+def _resolve_provider(model_name: str, provider: Provider) -> Literal["deepseek", "openai"]:
+    if provider not in {"auto", "deepseek", "openai"}:
+        raise ValueError(f"unsupported provider: {provider}")
+    if provider != "auto":
+        return provider
+    resolved_model = MODEL_ALIASES.get(model_name, model_name)
+    return "deepseek" if resolved_model.startswith("deepseek-") else "openai"
+
+
 def create_model(
     model_name: str,
     *,
+    provider: Provider = "auto",
     base_url: str | None = None,
     api_key: str | None = None,
     temperature: float = 0.0,
+    request_timeout: float = 60.0,
+    max_retries: int = 2,
+    deepseek_thinking: bool = False,
 ):
     if model_name == "mock":
         return MockCodingModel()
+    if not math.isfinite(request_timeout) or request_timeout <= 0:
+        raise ValueError("request_timeout must be greater than zero")
+    if max_retries < 0:
+        raise ValueError("max_retries must be zero or greater")
     resolved_model = MODEL_ALIASES.get(model_name, model_name)
-    resolved_base_url = base_url or os.getenv("MCA_BASE_URL") or os.getenv("OPENAI_BASE_URL")
-    resolved_api_key = api_key or os.getenv("MCA_API_KEY") or os.getenv("OPENAI_API_KEY")
+    resolved_provider = _resolve_provider(model_name, provider)
 
-    if resolved_model.startswith("deepseek-"):
-        resolved_base_url = resolved_base_url or os.getenv("DEEPSEEK_BASE_URL") or DEEPSEEK_BASE_URL
-        resolved_api_key = resolved_api_key or os.getenv("DEEPSEEK_API_KEY")
+    if resolved_provider == "deepseek":
+        resolved_base_url = (
+            base_url
+            or os.getenv("DEEPSEEK_BASE_URL")
+            or os.getenv("DEEPSEEK_API_BASE")
+            or os.getenv("MCA_BASE_URL")
+            or DEEPSEEK_BASE_URL
+        )
+        resolved_api_key = api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("MCA_API_KEY")
+        if not resolved_api_key:
+            raise RuntimeError(
+                "DeepSeek API key is missing. Set DEEPSEEK_API_KEY, MCA_API_KEY, or use --env-file."
+            )
+        model_options: dict[str, Any] = {
+            "model": resolved_model,
+            "base_url": resolved_base_url,
+            "api_key": resolved_api_key,
+            "timeout": request_timeout,
+            "max_retries": max_retries,
+            "extra_body": {
+                "thinking": {"type": "enabled" if deepseek_thinking else "disabled"}
+            },
+        }
+        # DeepSeek thinking mode ignores sampling parameters. Omitting them keeps
+        # the request unambiguous and avoids provider compatibility warnings.
+        if not deepseek_thinking:
+            model_options["temperature"] = temperature
+        return _deepseek_model_class()(**model_options)
+
+    resolved_base_url = base_url or os.getenv("OPENAI_BASE_URL") or os.getenv("MCA_BASE_URL")
+    resolved_api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("MCA_API_KEY")
+    if not resolved_api_key:
+        raise RuntimeError(
+            "OpenAI API key is missing. Set OPENAI_API_KEY, MCA_API_KEY, or use --env-file. "
+            "For a keyless local compatible server, set MCA_API_KEY=not-needed explicitly."
+        )
+    from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(
         model=resolved_model,
         base_url=resolved_base_url,
-        api_key=resolved_api_key or "not-needed",
+        api_key=resolved_api_key,
         temperature=temperature,
+        timeout=request_timeout,
+        max_retries=max_retries,
     )
