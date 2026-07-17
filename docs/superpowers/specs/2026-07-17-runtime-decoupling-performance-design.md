@@ -48,6 +48,11 @@ one-purpose modules:
 protocols and shared services rather than on each other or on `BashExecutor`.
 `executor.py` remains the concrete file, command, sandbox, and process runtime.
 
+The executor protocol includes `execute_tool`, `workspace_fingerprint`, and
+`sandbox_status`, because both orchestrators use all three capabilities. The
+snapshot protocol includes its deterministic digest and `diff` operation in
+addition to the files mapping.
+
 Compatibility imports in `agent.py` and `executor.py` keep the current import
 surface working while new code imports from the focused modules directly.
 

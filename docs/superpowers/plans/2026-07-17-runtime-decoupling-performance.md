@@ -92,6 +92,9 @@ class Redactor(Protocol):
 
 class SnapshotLike(Protocol):
     files: dict[str, str]
+    fingerprint: str
+
+    def diff(self, other: "SnapshotLike") -> dict[str, list[str]]: ...
 
 
 @runtime_checkable
@@ -103,6 +106,7 @@ class ToolExecutor(Protocol):
     def workspace_fingerprint(
         self, *, ignore_paths: set[Path] | None = None
     ) -> SnapshotLike | str: ...
+    def sandbox_status(self) -> str: ...
 ```
 
 Move `ExecutedToolCall` and `ToolBatchOutcome` to the same module. Import
