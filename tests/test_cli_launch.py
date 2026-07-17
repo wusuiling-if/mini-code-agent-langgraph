@@ -19,6 +19,10 @@ HEAVY_MODULES = {
 
 
 def _imported_top_level_modules(code: str) -> set[str]:
+    return {name.partition(".")[0] for name in _imported_modules(code)}
+
+
+def _imported_modules(code: str) -> set[str]:
     result = subprocess.run(
         [sys.executable, "-c", code],
         text=True,
@@ -38,6 +42,24 @@ def test_build_parser_does_not_import_heavy_runtime():
     )
 
     assert modules.isdisjoint(HEAVY_MODULES)
+
+
+def test_help_does_not_import_agent_runtime():
+    modules = _imported_modules(
+        "import sys\n"
+        "import mini_code_agent.cli as cli\n"
+        "sys.argv = ['mca', '--help']\n"
+        "try:\n"
+        "    cli.main()\n"
+        "except SystemExit as exc:\n"
+        "    if exc.code != 0:\n"
+        "        raise\n"
+        "print(','.join(sorted(sys.modules)))"
+    )
+
+    assert modules.isdisjoint(
+        HEAVY_MODULES | {"mini_code_agent.agent", "mini_code_agent.workspace"}
+    )
 
 
 def test_mock_model_does_not_import_provider_adapters():

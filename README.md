@@ -319,10 +319,13 @@ Undo 原始恢复内容保存在状态根目录的私有 `undo/` 中，使用 `0
 ## 项目结构
 
 ```text
+src/mini_code_agent/contracts.py   Runtime 协议与工具结果契约
+src/mini_code_agent/context.py     上下文压缩与工具调用审计
 src/mini_code_agent/agent.py       LangGraph Agent Loop
 src/mini_code_agent/chat.py        持续聊天会话
 src/mini_code_agent/model.py       工具声明与 provider adapter
 src/mini_code_agent/executor.py    Tool Runtime、审批和沙箱
+src/mini_code_agent/verification.py 工作区指纹绑定的验证门
 src/mini_code_agent/trajectory.py  Trace、Diff 和 Undo
 src/mini_code_agent/security.py    路径与密钥安全
 src/mini_code_agent/cli.py         CLI、状态目录与授权模式
@@ -337,5 +340,13 @@ python -m evals.run_evals --json
 ```
 
 `evals/run_evals.py` 是无需 API Key 的确定性行为基线，覆盖单文件修复、无需修改的解释任务，以及失败修改后的恢复。它输出 JSON 指标，包括成功率、验证率、步骤、工具调用数、耗时和无关改动数；任一 case 失败时返回非零退出码。
+
+可用以下命令测量安全工作区指纹的 cold/warm capture：
+
+```bash
+python benchmarks/benchmark_fingerprint.py --root . --runs 5
+```
+
+该 benchmark 扫描完整 verification scope，并报告当前机器和文件系统上的本地性能证据；结果不是可移植的 CI 阈值。
 
 这是一个安全优先的 reference runtime，而不是 Codex 或 Claude Code 的替代品。发布与贡献约定分别见 [CHANGELOG.md](CHANGELOG.md) 和 [CONTRIBUTING.md](CONTRIBUTING.md)。

@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Changed
+
+- Decoupled shared runtime contracts, context management, and verification orchestration from the LangGraph agent implementation while preserving lightweight CLI startup.
+- Improved secure workspace fingerprint performance without narrowing the verification scope, with a reproducible local cold/warm benchmark.
+
 ## [0.3.0] - 2026-07-16
 
 ### Added
