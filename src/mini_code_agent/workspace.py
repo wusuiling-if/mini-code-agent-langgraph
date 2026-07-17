@@ -14,6 +14,7 @@ from mini_code_agent.security import SafeWorkspace, SecurityError
 SKIP_DIRS = {".git", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"}
 FingerprintSignature = tuple[int, int, int, int, int, int]
 FingerprintCache = dict[str, tuple[FingerprintSignature, str]]
+CachedRegularCandidate = tuple[str, str, FingerprintSignature]
 
 
 def _directory_flags() -> int:
@@ -155,6 +156,7 @@ class WorkspaceFingerprinter:
             if not stat.S_ISDIR(root_metadata.st_mode):
                 raise NotADirectoryError(self.root)
             root_signature = _metadata_signature(root_metadata)
+            root_cached_regulars: list[CachedRegularCandidate] = []
             unreadable_entry = self._scan_directory(
                 root_fd,
                 (),
@@ -163,14 +165,16 @@ class WorkspaceFingerprinter:
                 ignored,
                 ignored_ancestors,
                 skip_dir_names=SKIP_DIRS,
+                cached_regulars=root_cached_regulars,
             )
             self._capture_git_controls(root_fd, files, live_cache_keys)
             final_root_signature = _metadata_signature(os.fstat(root_fd))
-            if (
-                not unreadable_entry
-                and final_root_signature != root_signature
-            ):
-                raise OSError("workspace root changed while fingerprinting")
+            if final_root_signature != root_signature:
+                if not unreadable_entry:
+                    raise OSError("workspace root changed while fingerprinting")
+                self._revalidate_cached_regulars(
+                    root_fd, root_cached_regulars
+                )
         finally:
             os.close(root_fd)
 
@@ -184,6 +188,7 @@ class WorkspaceFingerprinter:
         ignored_ancestors: set[str],
         *,
         skip_dir_names: set[str],
+        cached_regulars: list[CachedRegularCandidate] | None = None,
     ) -> bool:
         directory_metadata = os.fstat(directory_fd)
         if not stat.S_ISDIR(directory_metadata.st_mode):
@@ -191,6 +196,7 @@ class WorkspaceFingerprinter:
         directory_signature = _metadata_signature(directory_metadata)
         with os.scandir(directory_fd) as entries:
             names = sorted(entry.name for entry in entries)
+        cached_regulars = cached_regulars if cached_regulars is not None else []
         unreadable_entry = False
         for name in names:
             unreadable_entry = self._capture_named_entry(
@@ -203,11 +209,14 @@ class WorkspaceFingerprinter:
                 ignored_ancestors,
                 recurse_directories=True,
                 skip_dir_names=skip_dir_names,
+                cached_regulars=cached_regulars,
             ) or unreadable_entry
         final_directory_signature = _metadata_signature(os.fstat(directory_fd))
-        if not unreadable_entry and final_directory_signature != directory_signature:
-            display = _relative_name(relative_parts) or "."
-            raise OSError(f"directory changed while fingerprinting: {display}")
+        if final_directory_signature != directory_signature:
+            if not unreadable_entry:
+                display = _relative_name(relative_parts) or "."
+                raise OSError(f"directory changed while fingerprinting: {display}")
+            self._revalidate_cached_regulars(directory_fd, cached_regulars)
         return unreadable_entry
 
     def _capture_named_entry(
@@ -223,6 +232,7 @@ class WorkspaceFingerprinter:
         recurse_directories: bool,
         skip_dir_names: set[str],
         enumerated: bool = True,
+        cached_regulars: list[CachedRegularCandidate] | None = None,
     ) -> bool:
         relative_parts = (*parent_parts, name)
         relative = _relative_name(relative_parts)
@@ -298,6 +308,14 @@ class WorkspaceFingerprinter:
         if stat.S_ISREG(metadata.st_mode):
             if excluded:
                 return False
+            signature = _metadata_signature(metadata)
+            cached = self.cache.get(relative)
+            if cached is not None and cached[0] == signature:
+                live_cache_keys.add(relative)
+                files[relative] = cached[1]
+                if cached_regulars is not None:
+                    cached_regulars.append((name, relative, signature))
+                return False
             try:
                 file_fd = os.open(name, _file_flags(), dir_fd=parent_fd)
             except OSError:
@@ -332,6 +350,34 @@ class WorkspaceFingerprinter:
                 live_cache_keys,
             )
         return False
+
+    def _revalidate_cached_regulars(
+        self,
+        parent_fd: int,
+        candidates: list[CachedRegularCandidate],
+    ) -> None:
+        for name, relative, expected_signature in candidates:
+            try:
+                file_fd = os.open(name, _file_flags(), dir_fd=parent_fd)
+            except OSError as error:
+                self._raise_if_symlink_after_open_failure(
+                    parent_fd, name, relative
+                )
+                raise OSError(
+                    f"cached file could not be revalidated: {relative}"
+                ) from error
+            try:
+                metadata = os.fstat(file_fd)
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise SecurityError(
+                        f"cached file changed type while fingerprinting: {relative}"
+                    )
+                if _metadata_signature(metadata) != expected_signature:
+                    raise OSError(
+                        f"cached file changed while fingerprinting: {relative}"
+                    )
+            finally:
+                os.close(file_fd)
 
     def _store_metadata_entry(
         self,

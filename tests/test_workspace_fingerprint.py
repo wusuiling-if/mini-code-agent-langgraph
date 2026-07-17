@@ -76,22 +76,38 @@ def test_capture_does_not_resolve_every_regular_file(
     assert calls <= 4
 
 
+@pytest.mark.parametrize("use_descriptor", [True, False], ids=["descriptor", "fallback"])
 def test_warm_cache_skips_unchanged_hashes_and_rehashes_only_changed_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_descriptor: bool
 ):
     source = tmp_path / "source.py"
     unchanged = tmp_path / "unchanged.py"
     source.write_text("print('hello')\n", encoding="utf-8")
     unchanged.write_text("constant\n", encoding="utf-8")
     fingerprinter = workspace_module.WorkspaceFingerprinter(tmp_path)
-    original_hash = workspace_module._hash_file_descriptor
+    if use_descriptor and not workspace_module._descriptor_relative_scanning_available():
+        pytest.skip("descriptor-relative operations are unavailable")
+    fingerprinter._use_descriptor_relative_scanner = use_descriptor
     hashed_inodes: list[int] = []
 
-    def counted_hash(file_fd: int) -> str:
-        hashed_inodes.append(os.fstat(file_fd).st_ino)
-        return original_hash(file_fd)
+    if use_descriptor:
+        original_descriptor_hash = workspace_module._hash_file_descriptor
 
-    monkeypatch.setattr(workspace_module, "_hash_file_descriptor", counted_hash)
+        def counted_descriptor_hash(file_fd: int) -> str:
+            hashed_inodes.append(os.fstat(file_fd).st_ino)
+            return original_descriptor_hash(file_fd)
+
+        monkeypatch.setattr(
+            workspace_module, "_hash_file_descriptor", counted_descriptor_hash
+        )
+    else:
+        original_file_hash = workspace_module._hash_file
+
+        def counted_file_hash(path: Path, workspace=None) -> str:
+            hashed_inodes.append(path.stat().st_ino)
+            return original_file_hash(path, workspace)
+
+        monkeypatch.setattr(workspace_module, "_hash_file", counted_file_hash)
 
     cold = fingerprinter.capture()
     cold_hashes = list(hashed_inodes)
@@ -106,6 +122,73 @@ def test_warm_cache_skips_unchanged_hashes_and_rehashes_only_changed_file(
     fingerprinter.capture()
 
     assert hashed_inodes[len(cold_hashes) :] == [source.stat().st_ino]
+
+
+@pytest.mark.skipif(
+    not workspace_module._descriptor_relative_scanning_available(),
+    reason="descriptor-relative operations are unavailable",
+)
+def test_descriptor_warm_cache_does_not_reopen_unchanged_regular_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "source.py"
+    source.write_text("print('hello')\n", encoding="utf-8")
+    fingerprinter = _descriptor_fingerprinter(tmp_path)
+    cold = fingerprinter.capture()
+    original_open = os.open
+    reopened_regular_files: list[str] = []
+
+    def tracked_open(path, flags, *args, **kwargs):
+        if path == source.name and kwargs.get("dir_fd") is not None:
+            reopened_regular_files.append(path)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_module.os, "open", tracked_open)
+
+    warm = fingerprinter.capture()
+
+    assert warm.files == cold.files
+    assert reopened_regular_files == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative scanner is POSIX-only")
+def test_descriptor_warm_cache_revalidates_when_directory_change_is_tolerated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cached = tmp_path / "cached.txt"
+    target = tmp_path / "target.txt"
+    vanishing = tmp_path / "vanishing.txt"
+    cached.write_text("cached\n", encoding="utf-8")
+    target.write_text("target\n", encoding="utf-8")
+    fingerprinter = _descriptor_fingerprinter(tmp_path)
+    fingerprinter.capture()
+    vanishing.write_text("vanishing\n", encoding="utf-8")
+    original_stat = os.stat
+    switched = False
+
+    def racing_stat(path, *args, **kwargs):
+        nonlocal switched
+        descriptor_relative = (
+            kwargs.get("dir_fd") is not None
+            and kwargs.get("follow_symlinks") is False
+        )
+        if path == cached.name and descriptor_relative and not switched:
+            metadata = original_stat(path, *args, **kwargs)
+            cached.unlink()
+            try:
+                cached.symlink_to(target.name)
+            except OSError:
+                pytest.skip("symlinks are unavailable on this platform")
+            switched = True
+            return metadata
+        if path == vanishing.name and descriptor_relative:
+            vanishing.unlink(missing_ok=True)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(workspace_module.os, "stat", racing_stat)
+
+    with pytest.raises(SecurityError, match="cached.txt"):
+        fingerprinter.capture()
 
 
 def test_changing_one_file_changes_the_fingerprint(tmp_path: Path):
