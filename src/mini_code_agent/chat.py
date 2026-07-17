@@ -13,20 +13,23 @@ from langchain_core.messages import (
     messages_from_dict,
 )
 
-from mini_code_agent.agent import (
-    VerificationGate,
+from mini_code_agent.context import (
     audit_tool_args,
     audit_tool_calls,
-    capture_workspace_fingerprint,
     compact_messages,
-    execute_tool_batch,
     limit_model_tool_calls,
 )
-from mini_code_agent.executor import BashExecutor, ToolResult
+from mini_code_agent.contracts import ToolResult
+from mini_code_agent.executor import BashExecutor
 from mini_code_agent.model import ALL_TOOLS
 from mini_code_agent.prompts import CHAT_SYSTEM_PROMPT
 from mini_code_agent.trajectory import load_authenticated_undo_records, write_undo_journal
 from mini_code_agent.utils import serialize_messages, truncate_text, write_json
+from mini_code_agent.verification import (
+    VerificationGate,
+    capture_workspace_fingerprint,
+    execute_tool_batch,
+)
 
 
 MAX_PERSISTED_EVENTS = 2000

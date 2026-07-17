@@ -19,6 +19,7 @@ from pathlib import Path
 from shlex import join as shlex_join
 from typing import Any, Literal
 
+from mini_code_agent.contracts import ToolResult
 from mini_code_agent.security import SafeWorkspace, SecretRedactor
 from mini_code_agent.utils import DEFAULT_OUTPUT_LIMIT, truncate_text
 
@@ -114,45 +115,6 @@ def _defer_sigterm_until_cleanup():
         yield
     finally:
         signal.signal(signal.SIGTERM, previous)
-
-
-@dataclass
-class ToolResult:
-    tool: str
-    output: str
-    returncode: int
-    duration_ms: int
-    command: str = ""
-    args: dict[str, Any] | None = None
-    before_content: str | None = None
-    after_content: str | None = None
-    file_path: str = ""
-    file_existed_before: bool | None = None
-    before_hash: str = ""
-    after_hash: str = ""
-    exception_info: str = ""
-    submitted: bool = False
-    submission: str = ""
-    approved: bool = True
-    blocked: bool = False
-
-    def to_observation(self) -> dict:
-        data = {
-            "returncode": self.returncode,
-            "output": truncate_text(self.output, DEFAULT_OUTPUT_LIMIT),
-        }
-        if self.command:
-            data["command"] = self.command
-        if self.exception_info:
-            data["exception_info"] = self.exception_info
-        if self.submitted:
-            data["submitted"] = True
-            data["submission"] = self.submission
-        if not self.approved:
-            data["approved"] = False
-        if self.blocked:
-            data["blocked"] = True
-        return data
 
 
 class BashExecutor:
