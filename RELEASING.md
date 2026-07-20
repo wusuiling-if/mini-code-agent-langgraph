@@ -63,8 +63,9 @@ assert f"v{version}" == "v0.3.1"
 PY
 ```
 
-The release workflow repeats the version assertion and rejects any tag that is
-not exactly `v` followed by the package version.
+The release workflow repeats the version assertion, rejects any tag that is not
+exactly `v` followed by the package version, and verifies that the tagged commit
+is reachable from `origin/main` before building any package artifacts.
 
 ## Tag and publish
 
