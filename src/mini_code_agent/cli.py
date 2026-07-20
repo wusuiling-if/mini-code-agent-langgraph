@@ -355,6 +355,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--test-command",
         type=_non_empty_command,
         default=None,
+        help="Configure authoritative test verification and enable /code mode.",
     )
     chat.add_argument(
         "--allow-zero-tests",
@@ -517,7 +518,8 @@ def chat_command(args: argparse.Namespace) -> int:
         or os.getenv("MCA_DOCKER_IMAGE", "python:3.11-slim"),
     )
     model = _model_from_args(args)
-    _require_working_sandbox(executor)
+    if args.test_command is not None:
+        _require_working_sandbox(executor)
     output = _resume_output_path(args.resume, args.output, "chat")
     access = ChatAccessController(executor, coding_enabled=args.test_command is not None)
     session = _load_conversational_code_agent()(

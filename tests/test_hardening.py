@@ -272,8 +272,16 @@ def test_chat_code_command_without_test_command_stays_in_ask_mode(
         def __init__(self, model, executor, **kwargs):
             created["access"] = executor
 
-        def respond_turn(self, *args, **kwargs):
-            raise AssertionError("unavailable /code must not dispatch the remainder")
+        def respond_turn(self, user_text: str, *, coding_mode: bool):
+            calls = created.setdefault("turns", [])
+            calls.append((user_text, coding_mode))
+            return TurnResult(
+                text="ordinary answer",
+                status="answered",
+                completed=True,
+                verified=False,
+                steps=1,
+            )
 
         def close(self):
             created["closed"] = True
@@ -283,12 +291,20 @@ def test_chat_code_command_without_test_command_stays_in_ask_mode(
         def isatty() -> bool:
             return True
 
-    inputs = iter(["/code edit", "/exit"])
+    inputs = iter(["What does this project do?", "/code edit", "/exit"])
+
+    def fail_sandbox_probe(_executor):
+        raise RuntimeError("no sandbox backend is available")
+
     monkeypatch.setattr(cli_module.sys, "stdin", TtyInput())
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
     monkeypatch.setattr(cli_module, "_load_runtime_env", lambda _path: None)
     monkeypatch.setattr(cli_module, "_model_from_args", lambda _args: object())
-    monkeypatch.setattr(cli_module, "_require_working_sandbox", lambda _executor: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_require_working_sandbox",
+        fail_sandbox_probe,
+    )
     monkeypatch.setattr(
         cli_module,
         "_resume_output_path",
@@ -303,8 +319,6 @@ def test_chat_code_command_without_test_command_stays_in_ask_mode(
             str(tmp_path),
             "--model",
             "deepseek",
-            "--sandbox",
-            "none",
             "--allow-dirty",
         ]
     )
@@ -312,7 +326,15 @@ def test_chat_code_command_without_test_command_stays_in_ask_mode(
     assert cli_module.chat_command(args) == 0
 
     output = capsys.readouterr().out
+    assert "ordinary answer" in output
     assert "restart with --test-command" in output
+    assert created["turns"] == [
+        (
+            "[Read-only /ask mode is enforced: explain or inspect only; do not request "
+            "write, shell, or test tools.]\n\nWhat does this project do?",
+            False,
+        )
+    ]
     assert created["access"].mode == "ask"
     assert created["closed"] is True
 
