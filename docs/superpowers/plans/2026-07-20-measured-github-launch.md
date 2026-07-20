@@ -381,11 +381,42 @@ Expected: version is `0.3.1`; help and doctor render; demo exits zero with `Subm
 ```bash
 git diff --check origin/main...HEAD
 git status --short
-git grep -n -I -E 'sk-[[:alnum:]_-]{12,}|(DEEPSEEK|OPENAI|MCA)_API_KEY=[^[:space:]]+' HEAD -- . ':(exclude)docs/superpowers/plans/**'
+.venv/bin/python - <<'PY'
+import re
+import subprocess
+
+diff = subprocess.check_output(
+    ["git", "diff", "--unified=0", "origin/main...HEAD", "--", ".", ":(exclude)docs/superpowers/**"],
+    text=True,
+)
+pattern = re.compile(
+    r"sk-[A-Za-z0-9_-]{12,}|(?:DEEPSEEK|OPENAI|MCA)_API_KEY=[^\s\"'`]+"
+)
+found = set(pattern.findall(diff))
+allowed_fixtures_and_templates = {
+    "DEEPSEEK_API_KEY=...",
+    "DEEPSEEK_API_KEY=default-private-key\\n",
+    "DEEPSEEK_API_KEY=not-inspected\\n",
+    "DEEPSEEK_API_KEY={secret}\\n",
+    "MCA_API_KEY=not-needed",
+    "MCA_API_KEY=not-needed\\n",
+    "OPENAI_API_KEY=...",
+    "sk-do-not-print",
+    "sk-do-not-read-or-print",
+    "sk-parent-secret-123456",
+    "sk-testsecret123456",
+}
+unexpected = found - allowed_fixtures_and_templates
+assert not unexpected, sorted(unexpected)
+print("approved synthetic candidates:", sorted(found))
+PY
 git log --format='%H %s' origin/main..HEAD
 ```
 
-Expected: diff check exits zero; only intentional ignored build artifacts may exist; the secret-like scan returns no match; history is linear and contains only scoped commits.
+Expected: diff check exits zero; only intentional ignored build artifacts may
+exist; every candidate is one of the explicit synthetic test fixtures or
+documentation templates and `unexpected` is empty; history is linear and
+contains only scoped commits.
 
 - [ ] **Step 5: Obtain two-stage independent review**
 
