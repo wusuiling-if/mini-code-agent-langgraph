@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -13,7 +14,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
@@ -26,6 +27,7 @@ if str(SOURCE_ROOT) not in sys.path:
 from langchain_core.messages import AIMessage  # noqa: E402
 
 from mini_code_agent.agent import MiniCodeAgent  # noqa: E402
+from mini_code_agent.context import audit_tool_args  # noqa: E402
 from mini_code_agent.executor import BashExecutor  # noqa: E402
 from mini_code_agent.trajectory import load_trajectory, undo_trajectory  # noqa: E402
 
@@ -44,6 +46,14 @@ REFUSAL_CODES = frozenset(
 )
 
 
+class TrustedGitUnavailable(RuntimeError):
+    """The real-diff scenario cannot establish its trusted Git baseline."""
+
+
+class GitBaselineFailed(RuntimeError):
+    """A trusted Git command failed while creating the disposable baseline."""
+
+
 @dataclass(frozen=True)
 class PlannedResponse:
     content: str
@@ -58,6 +68,7 @@ class ExpectedToolEvent:
     submitted: bool = False
     tests_run: int | None = None
     exception_info: str = ""
+    argument_signature: str = ""
 
 
 @dataclass(frozen=True)
@@ -124,6 +135,20 @@ def _response(content: str, *calls: tuple[str, dict[str, Any]]) -> PlannedRespon
     return PlannedResponse(content=content, calls=tuple(calls))
 
 
+def _hash_audited_arguments(arguments: dict[str, Any]) -> str:
+    payload = json.dumps(
+        arguments,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _expected_argument_signature(tool: str, arguments: dict[str, Any]) -> str:
+    return _hash_audited_arguments(audit_tool_args(tool, arguments))
+
+
 def _tool(
     tool: str,
     returncode: int = 0,
@@ -186,7 +211,9 @@ CASES = (
         expected_verification_status="passed",
         expected_outcome="submitted",
         expects_submission=True,
-        expected_evidence=frozenset({"PassingTests", "VerifiedSubmission"}),
+        expected_evidence=frozenset(
+            {"PassingTests", "RealGitDiff", "VerifiedSubmission"}
+        ),
         expected_file_fragments=(("calculator.py", "return a + b"),),
         expected_submission_fragment="Fixed add()",
     ),
@@ -612,6 +639,30 @@ CASES = (
 )
 
 
+def _bind_expected_argument_signatures(case: EvalCase) -> EvalCase:
+    planned_calls = [
+        (tool, arguments)
+        for response in case.responses
+        for tool, arguments in response.calls
+    ]
+    if len(planned_calls) != len(case.expected_tools):
+        raise ValueError(f"tool contract length mismatch for {case.name}")
+    expected_tools: list[ExpectedToolEvent] = []
+    for expected, (tool, arguments) in zip(case.expected_tools, planned_calls):
+        if expected.tool != tool:
+            raise ValueError(f"tool contract order mismatch for {case.name}")
+        expected_tools.append(
+            replace(
+                expected,
+                argument_signature=_expected_argument_signature(tool, arguments),
+            )
+        )
+    return replace(case, expected_tools=tuple(expected_tools))
+
+
+CASES = tuple(_bind_expected_argument_signatures(case) for case in CASES)
+
+
 def _flatten_changes(changes: dict[str, list[str]]) -> set[str]:
     return {
         f"{kind}:{path}"
@@ -644,6 +695,9 @@ def _tool_event_contract(audit: dict[str, Any]) -> tuple[ExpectedToolEvent, ...]
                 else None
             ),
             exception_info=str(event.get("exception_info", "")),
+            argument_signature=_hash_audited_arguments(
+                event["args"] if isinstance(event.get("args"), dict) else {}
+            ),
         )
         for event in audit.get("events", [])
         if event.get("type") == "tool"
@@ -705,6 +759,53 @@ def _executor(workspace: Path) -> BashExecutor:
     )
 
 
+def _case_uses_tool(case: EvalCase, tool: str) -> bool:
+    return any(
+        planned_tool == tool
+        for response in case.responses
+        for planned_tool, _arguments in response.calls
+    )
+
+
+def _initialize_git_baseline(case: EvalCase, executor: BashExecutor) -> None:
+    if not _case_uses_tool(case, "git_diff"):
+        return
+    git = str(getattr(executor, "_git_executable", ""))
+    if not git:
+        raise TrustedGitUnavailable("a trusted Git executable is required")
+    hooks = Path(getattr(executor, "_runtime_root")) / "git-hooks"
+    hooks.mkdir(mode=0o700)
+    commands = (
+        [git, "init", "--quiet"],
+        [git, "add", "--all"],
+        [
+            git,
+            "-c",
+            "user.name=Verified Patch Eval",
+            "-c",
+            "user.email=eval@example.invalid",
+            "-c",
+            f"core.hooksPath={hooks}",
+            "commit",
+            "--quiet",
+            "--no-gpg-sign",
+            "-m",
+            "evaluation baseline",
+        ],
+    )
+    for command in commands:
+        try:
+            completed = executor._run_argv(
+                command,
+                sandbox=False,
+                timeout_seconds=10,
+            )
+        except Exception as exc:
+            raise GitBaselineFailed("trusted Git baseline command failed") from exc
+        if completed.returncode != 0:
+            raise GitBaselineFailed("trusted Git baseline command failed")
+
+
 @contextmanager
 def _scenario_state_directory(path: Path) -> Iterator[None]:
     existed = "MCA_STATE_DIR" in os.environ
@@ -722,6 +823,7 @@ def _scenario_state_directory(path: Path) -> Iterator[None]:
 
 def _run_standard(case: EvalCase, workspace: Path) -> ScenarioExecution:
     executor = _executor(workspace)
+    _initialize_git_baseline(case, executor)
     before = executor.workspace_fingerprint()
     audit = MiniCodeAgent(
         ScriptedEvalModel(case.responses),
@@ -735,6 +837,7 @@ def _run_standard(case: EvalCase, workspace: Path) -> ScenarioExecution:
 
 def _run_resume(case: EvalCase, workspace: Path, temporary: Path) -> ScenarioExecution:
     first_executor = _executor(workspace)
+    _initialize_git_baseline(case, first_executor)
     before = first_executor.workspace_fingerprint()
     persistence_file = temporary / "resume.json"
     first = MiniCodeAgent(
@@ -787,6 +890,7 @@ def _run_resume(case: EvalCase, workspace: Path, temporary: Path) -> ScenarioExe
 
 def _run_undo(case: EvalCase, workspace: Path, temporary: Path) -> ScenarioExecution:
     executor = _executor(workspace)
+    _initialize_git_baseline(case, executor)
     before = executor.workspace_fingerprint()
     original = (workspace / "note.py").read_text(encoding="utf-8")
     persistence_file = temporary / "undo.json"
@@ -847,10 +951,27 @@ def _accepted_submission(audit: dict[str, Any]) -> bool:
     )
 
 
+def _real_git_diff_observed(audit: dict[str, Any]) -> bool:
+    diff_events = [
+        event
+        for event in audit.get("events", [])
+        if event.get("type") == "tool" and event.get("tool") == "git_diff"
+    ]
+    return bool(diff_events) and all(
+        event.get("returncode") == 0
+        and "diff --git a/" in str(event.get("output", ""))
+        and "\n--- a/" in str(event.get("output", ""))
+        and "\n+++ b/" in str(event.get("output", ""))
+        for event in diff_events
+    )
+
+
 def _case_report(case: EvalCase, workspace: Path, execution: ScenarioExecution) -> dict[str, Any]:
     audit = execution.audit
     tool_contract = _tool_event_contract(audit)
     tool_contract_matched = tool_contract == case.expected_tools
+    requires_real_git_diff = _case_uses_tool(case, "git_diff")
+    real_git_diff = _real_git_diff_observed(audit)
     actual_changes = _flatten_changes(execution.final_changes)
     unrelated_changes = sorted(actual_changes - case.expected_changes)
     missing_changes = sorted(case.expected_changes - actual_changes)
@@ -898,6 +1019,8 @@ def _case_report(case: EvalCase, workspace: Path, execution: ScenarioExecution) 
         lifecycle_evidence.add("AuthenticatedRestoration")
     if execution.restored_original:
         lifecycle_evidence.add("OriginalRestored")
+    if real_git_diff:
+        lifecycle_evidence.add("RealGitDiff")
 
     evidence = set(refusal_evidence) | lifecycle_evidence
     if (
@@ -928,6 +1051,8 @@ def _case_report(case: EvalCase, workspace: Path, execution: ScenarioExecution) 
         validation_errors.append("TestEvidenceMismatch")
     if not tool_contract_matched:
         validation_errors.append("ToolEventContractMismatch")
+    if requires_real_git_diff and not real_git_diff:
+        validation_errors.append("GitDiffEvidenceMissing")
     if not case.expected_evidence.issubset(evidence):
         validation_errors.append("ExpectedEvidenceMissing")
     if case.expected_verification_status == "passed" and not audit.get(
@@ -993,6 +1118,7 @@ def _case_report(case: EvalCase, workspace: Path, execution: ScenarioExecution) 
         "exact_changes": not unrelated_changes and not missing_changes,
         "tools": _sanitized_tool_evidence(tool_contract),
         "tool_contract_matched": tool_contract_matched,
+        "real_git_diff": real_git_diff,
         "tests": tests,
         "evidence": sorted(evidence),
         "refusal_evidence": refusal_evidence,
@@ -1034,6 +1160,7 @@ def _sanitized_harness_failure(case: EvalCase, exc: Exception) -> dict[str, Any]
         "exact_changes": False,
         "tools": [],
         "tool_contract_matched": False,
+        "real_git_diff": False,
         "tests": [],
         "evidence": [],
         "refusal_evidence": [],

@@ -7,7 +7,7 @@ It requires no provider credentials and makes no network requests.
 
 The cases are:
 
-- `single-file-fix`: repair one file, verify, inspect the diff, and submit;
+- `single-file-fix`: repair one file, verify, inspect a real tracked diff, and submit;
 - `multi-file-fix`: make exactly two required implementation edits and submit;
 - `explain-only`: verify and explain existing behavior without changing files;
 - `failed-fix-recovery`: observe a failed edit, correct it, and verify again;
@@ -40,15 +40,18 @@ Run one case, select several cases, or save the sanitized report:
 Every selection retains report schema `2` and suite name
 `verified-patch-v0.3.2`. Stable evidence includes case names, scripted plans,
 expected outcomes, policy refusal codes, exact expected and unrelated changes,
-structured `returncode`/`tests_run` records, steps, tool calls, and pass/fail
-results. `duration_ms`, Python major/minor, and the platform system name are
-informational and may vary by machine. The process exits nonzero if any selected
-case fails its full contract.
+structured `returncode`/`tests_run` records, ordered tool-result and private
+hashed-argument contracts, steps, tool calls, and pass/fail results. The
+single-file scenario creates a committed disposable Git baseline and requires
+recognized tracked-diff markers. `duration_ms`, Python major/minor, and the
+platform system name are informational and may vary by machine. The process
+exits nonzero if any selected case fails its full contract.
 
 Reports contain normalized evidence only. They do not contain raw agent state,
 workspace contents, secret values, Undo records, authentication keys, or
-persistence and internal state paths. Lifecycle files used by resume and Undo
-exist only inside the scenario's disposable temporary directory.
+persistence and internal state paths. Tool argument values and their private
+validation signatures are also omitted. Lifecycle files used by resume and
+Undo exist only inside the scenario's disposable temporary directory.
 
 ## Scope boundary
 

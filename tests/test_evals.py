@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from mini_code_agent.contracts import ToolResult
 from mini_code_agent.executor import BashExecutor
 
-from evals.run_evals import CASES, main, run_suite
+from evals.run_evals import CASES, main, run_case, run_suite
 
 
 def test_case_matrix_has_the_exact_required_tool_sequences() -> None:
@@ -85,6 +86,41 @@ def test_non_test_tool_failure_breaks_the_exact_event_contract(monkeypatch) -> N
     assert "ToolEventContractMismatch" in case["validation_errors"]
 
 
+def test_tool_argument_contract_rejects_a_wrong_read_target() -> None:
+    case = next(case for case in CASES if case.name == "single-file-fix")
+    responses = list(case.responses)
+    responses[2] = replace(
+        responses[2],
+        calls=(("read_file", {"path": "test_calculator.py"}),),
+    )
+
+    result = run_case(replace(case, responses=tuple(responses)))
+
+    assert result["passed"] is False
+    assert result["tool_contract_matched"] is False
+    assert "ToolEventContractMismatch" in result["validation_errors"]
+    assert "test_calculator.py" not in json.dumps(result)
+    assert all("args" not in event for event in result["tools"])
+
+
+def test_unavailable_git_diff_evidence_cannot_pass(monkeypatch) -> None:
+    def unavailable_git_diff(self: BashExecutor, path: str = "") -> ToolResult:
+        return ToolResult(
+            tool="git_diff",
+            output="No git repository found for this workspace.",
+            returncode=0,
+            duration_ms=0,
+            args={"path": path},
+        )
+
+    monkeypatch.setattr(BashExecutor, "git_diff", unavailable_git_diff)
+
+    case = run_suite({"single-file-fix"})["cases"][0]
+    assert case["passed"] is False
+    assert case["real_git_diff"] is False
+    assert "GitDiffEvidenceMissing" in case["validation_errors"]
+
+
 def test_verified_patch_suite_covers_all_eleven_policy_cases() -> None:
     report = run_suite()
 
@@ -95,6 +131,8 @@ def test_verified_patch_suite_covers_all_eleven_policy_cases() -> None:
     assert report["aggregate"]["unexpected_submissions"] == 0
     assert report["aggregate"]["unrelated_change_count"] == 0
     assert all(case["passed"] for case in report["cases"])
+    single = next(case for case in report["cases"] if case["name"] == "single-file-fix")
+    assert single["real_git_diff"] is True
 
     assert report["harness"]["offline"] is True
     assert report["harness"]["network"] == "disabled"
