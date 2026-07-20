@@ -311,7 +311,7 @@ Run:
 
 ```bash
 rg -n 'Submitted|workspace fingerprint|redacted|resumable|HMAC-authenticated|not a digital signature|Show HN|AI-generated|seven days' docs/launch/0.3.1.md
-rg -n '求星|求 Star|please star|upvote this|digital signature' docs/launch/0.3.1.md
+rg -n '求星|求 Star|please star|upvote this|HMAC is a digital signature|HMAC proves semantic correctness' docs/launch/0.3.1.md
 git diff --check
 ```
 
