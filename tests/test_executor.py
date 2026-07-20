@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import shlex
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from mini_code_agent.executor import BashExecutor
 
@@ -81,6 +84,92 @@ def test_run_tests_can_explicitly_allow_recognized_zero_test_success(tmp_path: P
     ).execute_tool("run_tests", {})
 
     assert result.returncode == 0
+    assert result.exception_info == ""
+    assert result.tests_run == 0
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "Ran 0 tests in 0.001s\n\nOK\n",
+        "collected 0 items\n",
+    ],
+    ids=["unittest", "pytest"],
+)
+def test_run_tests_rejects_recognized_zero_test_exit_five(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: str
+):
+    executor = BashExecutor(
+        tmp_path,
+        approval_mode="yolo",
+        sandbox_mode="none",
+        default_test_command="test command",
+    )
+    monkeypatch.setattr(
+        executor,
+        "_run",
+        lambda command: subprocess.CompletedProcess(command, 5, output),
+    )
+
+    result = executor.execute_tool("run_tests", {})
+
+    assert result.returncode != 0
+    assert result.exception_info == "NoTestsCollected"
+    assert result.tests_run == 0
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "Ran 0 tests in 0.001s\n\nOK\n",
+        "no tests ran in 0.01s\n",
+    ],
+    ids=["unittest", "pytest"],
+)
+def test_run_tests_allows_recognized_zero_test_exit_five_when_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: str
+):
+    executor = BashExecutor(
+        tmp_path,
+        approval_mode="yolo",
+        sandbox_mode="none",
+        default_test_command="test command",
+        allow_zero_tests=True,
+    )
+    monkeypatch.setattr(
+        executor,
+        "_run",
+        lambda command: subprocess.CompletedProcess(command, 5, output),
+    )
+
+    result = executor.execute_tool("run_tests", {})
+
+    assert result.returncode == 0
+    assert result.exception_info == ""
+    assert result.tests_run == 0
+
+
+def test_run_tests_does_not_promote_unrelated_failure_with_zero_test_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    executor = BashExecutor(
+        tmp_path,
+        approval_mode="yolo",
+        sandbox_mode="none",
+        default_test_command="test command",
+        allow_zero_tests=True,
+    )
+    monkeypatch.setattr(
+        executor,
+        "_run",
+        lambda command: subprocess.CompletedProcess(
+            command, 2, "Ran 0 tests in 0.001s\nconfiguration failed\n"
+        ),
+    )
+
+    result = executor.execute_tool("run_tests", {})
+
+    assert result.returncode == 2
     assert result.exception_info == ""
     assert result.tests_run == 0
 

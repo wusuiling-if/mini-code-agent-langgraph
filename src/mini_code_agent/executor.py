@@ -689,9 +689,12 @@ class BashExecutor:
             result.tests_run = int(unittest_match.group(1))
         elif PYTEST_ZERO.search(result.output):
             result.tests_run = 0
-        if result.returncode == 0 and result.tests_run == 0 and not self.allow_zero_tests:
-            result.returncode = 1
-            result.exception_info = "NoTestsCollected"
+        if result.tests_run == 0 and result.returncode in {0, 5}:
+            if self.allow_zero_tests:
+                result.returncode = 0
+            else:
+                result.returncode = 1
+                result.exception_info = "NoTestsCollected"
         return result
 
     def submit(self, summary: str = "") -> ToolResult:
