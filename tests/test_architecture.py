@@ -1,10 +1,12 @@
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
 
-from mini_code_agent.contracts import ToolResult
+from mini_code_agent.contracts import SnapshotLike, ToolExecutor, ToolResult
 from mini_code_agent.verification import VerificationGate, execute_tool_batch
 
 
@@ -43,13 +45,32 @@ class _IdentityRedactor:
         return value
 
 
+@dataclass
+class _FakeSnapshot:
+    files: dict[str, str]
+    fingerprint: str
+
+    def diff(self, other: SnapshotLike) -> dict[str, list[str]]:
+        return {
+            "created": sorted(set(other.files) - set(self.files)),
+            "deleted": sorted(set(self.files) - set(other.files)),
+            "modified": sorted(
+                path
+                for path in set(self.files) & set(other.files)
+                if self.files[path] != other.files[path]
+            ),
+        }
+
+
 class _FakeExecutor:
     def __init__(self, cwd: Path):
         self.cwd = cwd
         self.redactor = _IdentityRedactor()
 
-    def workspace_fingerprint(self, *, ignore_paths=None) -> str:
-        return "stable-fingerprint"
+    def workspace_fingerprint(self, *, ignore_paths=None) -> _FakeSnapshot:
+        return _FakeSnapshot(
+            files={"example.py": "file:stable"}, fingerprint="stable-fingerprint"
+        )
 
     def execute_tool(self, name: str, args: dict) -> ToolResult:
         return ToolResult(
@@ -68,6 +89,8 @@ def test_execute_tool_batch_accepts_a_protocol_fake(tmp_path: Path):
     executor = _FakeExecutor(tmp_path)
     gate = VerificationGate.create("stable-fingerprint")
 
+    assert isinstance(executor, ToolExecutor)
+
     outcome = execute_tool_batch(
         executor,
         [{"name": "list_files", "args": {}, "id": "list-1"}],
@@ -76,6 +99,12 @@ def test_execute_tool_batch_accepts_a_protocol_fake(tmp_path: Path):
 
     assert [call.tool_call_id for call in outcome.calls] == ["list-1"]
     assert outcome.calls[0].result.output == "fake result"
+
+
+def test_full_agent_executor_protocol_requires_a_snapshot():
+    annotation = get_type_hints(ToolExecutor.workspace_fingerprint)["return"]
+
+    assert annotation is SnapshotLike
 
 
 def test_legacy_runtime_exports_are_preserved():

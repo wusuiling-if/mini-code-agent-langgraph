@@ -682,6 +682,15 @@ def test_capture_adapter_prefers_snapshot_fingerprint(tmp_path: Path):
     assert capture_workspace_fingerprint(executor) == "native-fingerprint"
 
 
+def test_capture_adapter_keeps_direct_string_tolerance(tmp_path: Path):
+    executor = SimpleNamespace(
+        cwd=tmp_path,
+        workspace_fingerprint=lambda **_kwargs: "legacy-fingerprint",
+    )
+
+    assert capture_workspace_fingerprint(executor) == "legacy-fingerprint"
+
+
 def test_capture_adapter_keeps_files_fallback(tmp_path: Path):
     files = {"a": "b"}
     executor = SimpleNamespace(
