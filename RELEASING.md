@@ -48,10 +48,16 @@ For version `0.3.1`, verify the exact tag/package relationship locally:
 
 ```bash
 python - <<'PY'
+import sys
 import tomllib
 from pathlib import Path
 
-version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+root = Path.cwd().resolve()
+sys.path.insert(0, str(root / "src"))
+from mini_code_agent import __version__ as source_version
+
+version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+assert source_version == version
 assert version == "0.3.1"
 assert f"v{version}" == "v0.3.1"
 PY
