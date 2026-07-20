@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shlex
+import sys
 from pathlib import Path
 
 from mini_code_agent.executor import BashExecutor
@@ -44,6 +46,43 @@ def test_run_tests_uses_configured_command_only_without_shell_permission(tmp_pat
     default = executor.execute_tool("run_tests", {})
     assert default.returncode == 0
     assert "123" in default.output
+
+
+def test_run_tests_rejects_recognized_zero_test_success(tmp_path: Path):
+    result = BashExecutor(
+        tmp_path,
+        approval_mode="yolo",
+        sandbox_mode="none",
+        default_test_command=f"{shlex.quote(sys.executable)} -m unittest discover -v",
+    ).execute_tool("run_tests", {})
+
+    assert result.returncode != 0
+    assert result.exception_info == "NoTestsCollected"
+    assert result.tests_run == 0
+    assert result.to_observation()["tests_run"] == 0
+
+
+def test_run_tests_requires_an_authoritative_command(tmp_path: Path):
+    result = BashExecutor(
+        tmp_path, approval_mode="yolo", sandbox_mode="none"
+    ).execute_tool("run_tests", {})
+
+    assert result.blocked
+    assert result.exception_info == "TestCommandRequired"
+
+
+def test_run_tests_can_explicitly_allow_recognized_zero_test_success(tmp_path: Path):
+    result = BashExecutor(
+        tmp_path,
+        approval_mode="yolo",
+        sandbox_mode="none",
+        default_test_command=f"{shlex.quote(sys.executable)} -m unittest discover -v",
+        allow_zero_tests=True,
+    ).execute_tool("run_tests", {})
+
+    assert result.returncode == 0
+    assert result.exception_info == ""
+    assert result.tests_run == 0
 
 
 def test_apply_patch_replace_lines_and_write_file_return_diffs(tmp_path: Path):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -46,7 +47,14 @@ def test_mock_agent_fixes_bug_and_records_trajectory(tmp_path: Path):
 
     agent = MiniCodeAgent(
         create_model("mock"),
-        BashExecutor(repo, approval_mode="yolo", sandbox_mode="none"),
+        BashExecutor(
+            repo,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            default_test_command=(
+                f"{shlex.quote(sys.executable)} -m unittest discover -v"
+            ),
+        ),
         trajectory_path=trajectory_path,
         quiet=True,
     )
@@ -65,6 +73,15 @@ def test_mock_agent_fixes_bug_and_records_trajectory(tmp_path: Path):
         "git_diff",
         "submit",
     ]
+    test_events = [
+        event for event in trajectory["events"] if event.get("tool") == "run_tests"
+    ]
+    assert [event["tests_run"] for event in test_events] == [3, 3]
+    assert all(
+        "tests_run" not in event
+        for event in trajectory["events"]
+        if event.get("tool") != "run_tests"
+    )
 
 
 def test_trace_summary_and_undo_restore_original_file(tmp_path: Path):
@@ -73,7 +90,14 @@ def test_trace_summary_and_undo_restore_original_file(tmp_path: Path):
     trajectory_path = tmp_path / "run.traj.json"
     agent = MiniCodeAgent(
         create_model("mock"),
-        BashExecutor(repo, approval_mode="yolo", sandbox_mode="none"),
+        BashExecutor(
+            repo,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            default_test_command=(
+                f"{shlex.quote(sys.executable)} -m unittest discover -v"
+            ),
+        ),
         trajectory_path=trajectory_path,
         quiet=True,
     )
@@ -102,7 +126,9 @@ def test_cli_noninteractive_requires_yes(tmp_path: Path):
             "--cwd",
             str(repo),
             "--model",
-            "mock",
+            "deepseek",
+            "--test-command",
+            f"{shlex.quote(sys.executable)} -m unittest discover -v",
             "--quiet",
         ],
         text=True,
@@ -119,7 +145,14 @@ def test_cli_trace_command(tmp_path: Path):
     trajectory_path = tmp_path / "run.traj.json"
     agent = MiniCodeAgent(
         create_model("mock"),
-        BashExecutor(repo, approval_mode="yolo", sandbox_mode="none"),
+        BashExecutor(
+            repo,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            default_test_command=(
+                f"{shlex.quote(sys.executable)} -m unittest discover -v"
+            ),
+        ),
         trajectory_path=trajectory_path,
         quiet=True,
     )
@@ -142,7 +175,14 @@ def test_trajectory_keeps_reversible_source_only_in_private_journal(tmp_path: Pa
     trajectory_path = tmp_path / "run.traj.json"
     agent = MiniCodeAgent(
         create_model("mock"),
-        BashExecutor(repo, approval_mode="yolo", sandbox_mode="none"),
+        BashExecutor(
+            repo,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            default_test_command=(
+                f"{shlex.quote(sys.executable)} -m unittest discover -v"
+            ),
+        ),
         trajectory_path=trajectory_path,
         quiet=True,
     )
@@ -262,10 +302,17 @@ def test_chat_session_can_answer_normally_and_complete_a_coding_turn(tmp_path: P
             tmp_path,
             approval_mode="yolo",
             sandbox_mode="none",
-            default_test_command="python3 -c 'print(\"ok\")'",
+            default_test_command="python3 -c 'print(\"Ran 2 tests in 0.01s\")'",
         ),
         quiet=True,
     )
     assert session.respond("hello") == "hello back"
     assert session.respond("update the note") == "updated note"
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "new\n"
+    test_events = [event for event in session.events if event.get("tool") == "run_tests"]
+    assert [event["tests_run"] for event in test_events] == [2]
+    assert all(
+        "tests_run" not in event
+        for event in session.events
+        if event.get("tool") != "run_tests"
+    )

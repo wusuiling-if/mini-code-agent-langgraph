@@ -77,14 +77,27 @@ def _load_create_model():
 class ChatAccessController:
     """Enforce read-only /ask mode without changing the agent/tool runtime API."""
 
-    def __init__(self, executor: Any):
+    def __init__(self, executor: Any, *, coding_enabled: bool = True):
         self._executor = executor
+        self._coding_enabled = coding_enabled
         self.mode = "ask"
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._executor, name)
 
     def execute_tool(self, name: str, args: dict[str, Any]) -> Any:
+        if not self._coding_enabled and name not in READ_ONLY_CHAT_TOOLS:
+            return _load_tool_result()(
+                tool=name,
+                output=(
+                    f"{name} requires an authoritative test command. Restart with "
+                    "--test-command '<command>'."
+                ),
+                returncode=-1,
+                duration_ms=0,
+                exception_info="TestCommandRequired",
+                blocked=True,
+            )
         if self.mode == "ask" and name not in READ_ONLY_CHAT_TOOLS:
             return _load_tool_result()(
                 tool=name,
@@ -257,7 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("task", nargs="?", help="Task for a new agent run.")
     run.add_argument("--cwd", default=None, help="Project directory. Defaults to current directory.")
     run.add_argument("--resume", type=Path, default=None, help="Resume an unfinished run trajectory.")
-    run.add_argument("--model", default="mock", help="Model name. Use 'mock' for a local dry run.")
+    run.add_argument("--model", required=True, help="Model name.")
     run.add_argument("--provider", choices=["auto", "deepseek", "openai"], default="auto")
     run.add_argument("--base-url", default=None, help="Provider API base URL.")
     run.add_argument(
@@ -284,8 +297,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--test-command",
         type=_non_empty_command,
-        default="python3 -m unittest discover -v",
+        required=True,
         help="Default command for run_tests.",
+    )
+    run.add_argument(
+        "--allow-zero-tests",
+        action="store_true",
+        help="Allow a recognized zero-test result to satisfy verification.",
     )
     run.add_argument("--output", type=Path, default=None, help="Trajectory JSON path.")
     run.add_argument("--allow-shell", action="store_true", help="Allow arbitrary bash tool calls.")
@@ -336,7 +354,12 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument(
         "--test-command",
         type=_non_empty_command,
-        default="python3 -m unittest discover -v",
+        default=None,
+    )
+    chat.add_argument(
+        "--allow-zero-tests",
+        action="store_true",
+        help="Allow a recognized zero-test result to satisfy verification.",
     )
     chat.add_argument("--output", type=Path, default=None, help="Session trajectory JSON path.")
     chat.add_argument("--allow-shell", action="store_true")
@@ -408,6 +431,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_agent(args: argparse.Namespace) -> int:
+    if args.model == "mock":
+        raise RuntimeError(
+            "The scripted mock is not a general coding model; use `mca demo` for the no-key demo."
+        )
     from mini_code_agent.trajectory import collect_file_diffs, load_trajectory
 
     auto_approve = args.yolo or args.yes
@@ -431,6 +458,7 @@ def run_agent(args: argparse.Namespace) -> int:
         approval_mode="yolo" if auto_approve else "confirm",
         allow_shell=args.allow_shell,
         default_test_command=args.test_command,
+        allow_zero_tests=args.allow_zero_tests,
         sandbox_mode=args.sandbox,
         docker_image=args.docker_image
         or os.getenv("MCA_DOCKER_IMAGE", "python:3.11-slim"),
@@ -483,6 +511,7 @@ def chat_command(args: argparse.Namespace) -> int:
         approval_mode="yolo" if args.yes else "confirm",
         allow_shell=args.allow_shell,
         default_test_command=args.test_command,
+        allow_zero_tests=args.allow_zero_tests,
         sandbox_mode=args.sandbox,
         docker_image=args.docker_image
         or os.getenv("MCA_DOCKER_IMAGE", "python:3.11-slim"),
@@ -490,7 +519,7 @@ def chat_command(args: argparse.Namespace) -> int:
     model = _model_from_args(args)
     _require_working_sandbox(executor)
     output = _resume_output_path(args.resume, args.output, "chat")
-    access = ChatAccessController(executor)
+    access = ChatAccessController(executor, coding_enabled=args.test_command is not None)
     session = _load_conversational_code_agent()(
         model,
         access,
@@ -524,6 +553,13 @@ def chat_command(args: argparse.Namespace) -> int:
                 continue
             command, separator, remainder = user_text.partition(" ")
             if command in {"/ask", "/code"}:
+                if command == "/code" and args.test_command is None:
+                    access.mode = "ask"
+                    print(
+                        "/code is unavailable: restart with --test-command '<command>' "
+                        "to enable coding. Staying in /ask mode."
+                    )
+                    continue
                 access.mode = command.removeprefix("/")
                 print(f"mode={command}")
                 if access.mode == "code" and args.yes:

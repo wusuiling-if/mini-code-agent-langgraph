@@ -73,6 +73,24 @@ def test_mock_model_does_not_import_provider_adapters():
     assert modules.isdisjoint({"langchain_openai", "langchain_deepseek"})
 
 
+def test_run_requires_explicit_model_and_test_command():
+    parser = cli_module.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run", "task", "--model", "deepseek"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run", "task", "--test-command", "pytest -q"])
+
+
+def test_run_rejects_scripted_mock_before_runtime_setup():
+    args = cli_module.build_parser().parse_args(
+        ["run", "task", "--model", "mock", "--test-command", "pytest -q"]
+    )
+
+    with pytest.raises(RuntimeError, match="mca demo"):
+        cli_module.run_agent(args)
+
+
 def test_trajectory_helpers_do_not_import_model_message_runtime():
     modules = _imported_top_level_modules(
         "import sys; "

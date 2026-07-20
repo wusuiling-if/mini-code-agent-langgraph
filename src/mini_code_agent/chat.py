@@ -294,21 +294,22 @@ class ConversationalCodeAgent:
     def _tool_event(
         self, step: int, name: str, args: dict[str, Any], result: ToolResult
     ) -> dict[str, Any]:
-        return self.executor.redactor.redact_data(
-            {
-                "type": "tool",
-                "step": step,
-                "tool": name,
-                "args": audit_tool_args(name, args),
-                "command": truncate_text(result.command),
-                "returncode": result.returncode,
-                "duration_ms": result.duration_ms,
-                "output": truncate_text(result.output),
-                "exception_info": truncate_text(result.exception_info),
-                "submitted": result.submitted,
-                "blocked": result.blocked,
-            }
-        )
+        event = {
+            "type": "tool",
+            "step": step,
+            "tool": name,
+            "args": audit_tool_args(name, args),
+            "command": truncate_text(result.command),
+            "returncode": result.returncode,
+            "duration_ms": result.duration_ms,
+            "output": truncate_text(result.output),
+            "exception_info": truncate_text(result.exception_info),
+            "submitted": result.submitted,
+            "blocked": result.blocked,
+        }
+        if result.tests_run is not None:
+            event["tests_run"] = result.tests_run
+        return self.executor.redactor.redact_data(event)
 
     def _artifact_paths(self) -> set[Path]:
         if not self.trajectory_path:
