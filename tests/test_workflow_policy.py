@@ -73,7 +73,8 @@ def _mapping_block(
 
     values: dict[str, str] = {}
     for line in lines[header_indexes[0] + 1 :]:
-        if not line.strip():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
             continue
         indentation = len(line) - len(line.lstrip(" "))
         if indentation <= header_indent:
@@ -297,6 +298,18 @@ def test_codeql_permission_policy_rejects_duplicate_write_scope():
         _assert_codeql_permissions_are_narrow(mutated)
 
 
+def test_codeql_permission_policy_ignores_comment_indentation_boundaries():
+    workflow = _workflow("codeql.yml")
+    mutated = workflow.replace(
+        "      security-events: write",
+        "      security-events: write\n# parser boundary\n  # consecutive comment\n      contents: write",
+    )
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
+        _assert_codeql_permissions_are_narrow(mutated)
+
+
 def test_release_permissions_and_gates_remain_narrow():
     workflow = _workflow("release.yml")
     jobs = _job_blocks(workflow)
@@ -322,6 +335,18 @@ def test_release_permission_policy_rejects_appended_write_scope():
     mutated = workflow.replace(
         "      id-token: write",
         "      id-token: write\n      contents: write",
+    )
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
+        _assert_release_permissions_are_narrow(mutated)
+
+
+def test_release_permission_policy_ignores_comment_indentation_boundaries():
+    workflow = _workflow("release.yml")
+    mutated = workflow.replace(
+        "      id-token: write",
+        "      id-token: write\n# parser boundary\n    # consecutive comment\n      contents: write",
     )
     assert mutated != workflow
 
