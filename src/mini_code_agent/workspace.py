@@ -15,6 +15,13 @@ SKIP_DIRS = {".git", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache
 FingerprintSignature = tuple[int, int, int, int, int, int]
 FingerprintCache = dict[str, tuple[FingerprintSignature, str]]
 CachedRegularCandidate = tuple[str, str, FingerprintSignature]
+_MAX_GIT_REFERENCE_BYTES = 65536
+
+
+@dataclass(frozen=True)
+class _GitControlDirectories:
+    worktree: Path
+    common: Path
 
 
 def _directory_flags() -> int:
@@ -31,6 +38,111 @@ def _file_flags() -> int:
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     return flags
+
+
+def _read_git_reference(path: Path, label: str) -> str:
+    try:
+        original_metadata = path.lstat()
+    except FileNotFoundError:
+        raise
+    if stat.S_ISLNK(original_metadata.st_mode) or not stat.S_ISREG(
+        original_metadata.st_mode
+    ):
+        raise SecurityError(f"{label} must be a regular file")
+    file_fd = os.open(path, _file_flags())
+    try:
+        opened_metadata = os.fstat(file_fd)
+        if not stat.S_ISREG(opened_metadata.st_mode):
+            raise SecurityError(f"{label} changed while fingerprinting")
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            chunk = os.read(file_fd, min(4096, _MAX_GIT_REFERENCE_BYTES + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > _MAX_GIT_REFERENCE_BYTES:
+                raise SecurityError(f"{label} is too large")
+        if _metadata_signature(os.fstat(file_fd)) != _metadata_signature(
+            opened_metadata
+        ):
+            raise OSError(f"{label} changed while fingerprinting")
+    finally:
+        os.close(file_fd)
+    try:
+        return b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise SecurityError(f"{label} is not valid UTF-8") from error
+
+
+def _single_git_reference(value: str, label: str) -> str:
+    lines = value.splitlines()
+    if len(lines) != 1 or not lines[0].strip() or "\x00" in lines[0]:
+        raise SecurityError(f"{label} is malformed")
+    return lines[0].strip()
+
+
+def _validated_git_directory(base: Path, value: str, label: str) -> Path:
+    reference = Path(_single_git_reference(value, label))
+    candidate = reference if reference.is_absolute() else base / reference
+    candidate = Path(os.path.abspath(candidate))
+    current = Path(candidate.anchor)
+    start = 1 if candidate.anchor else 0
+    try:
+        for part in candidate.parts[start:]:
+            current /= part
+            metadata = current.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                raise SecurityError(f"{label} must not traverse symbolic links")
+    except FileNotFoundError as error:
+        raise SecurityError(f"{label} does not exist") from error
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise SecurityError(f"{label} must reference a directory")
+    return candidate
+
+
+def _git_control_directories(root: Path) -> _GitControlDirectories | None:
+    git_entry = root / ".git"
+    try:
+        metadata = git_entry.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISDIR(metadata.st_mode):
+        return _GitControlDirectories(worktree=git_entry, common=git_entry)
+    if not stat.S_ISREG(metadata.st_mode):
+        return None
+
+    pointer = _single_git_reference(_read_git_reference(git_entry, ".git"), ".git")
+    prefix = "gitdir: "
+    if not pointer.startswith(prefix) or not pointer[len(prefix) :].strip():
+        raise SecurityError(".git is not a valid linked-worktree pointer")
+    worktree_git_dir = _validated_git_directory(
+        root, pointer[len(prefix) :], ".git gitdir"
+    )
+    commondir_path = worktree_git_dir / "commondir"
+    try:
+        common_reference = _read_git_reference(
+            commondir_path, ".git gitdir/commondir"
+        )
+    except FileNotFoundError:
+        return _GitControlDirectories(
+            worktree=worktree_git_dir, common=worktree_git_dir
+        )
+
+    common_git_dir = _validated_git_directory(
+        worktree_git_dir, common_reference, ".git common directory"
+    )
+    backlink = _single_git_reference(
+        _read_git_reference(worktree_git_dir / "gitdir", ".git gitdir/gitdir"),
+        ".git gitdir/gitdir",
+    )
+    backlink_path = Path(backlink)
+    if not backlink_path.is_absolute():
+        backlink_path = worktree_git_dir / backlink_path
+    if Path(os.path.abspath(backlink_path)) != git_entry:
+        raise SecurityError(".git linked-worktree back-reference does not match")
+    return _GitControlDirectories(worktree=worktree_git_dir, common=common_git_dir)
 
 
 def _descriptor_relative_scanning_available() -> bool:
@@ -475,29 +587,52 @@ class WorkspaceFingerprinter:
         files: dict[str, str],
         live_cache_keys: set[str],
     ) -> None:
-        try:
-            git_metadata = os.stat(".git", dir_fd=root_fd, follow_symlinks=False)
-        except FileNotFoundError:
+        directories = _git_control_directories(self.root)
+        if directories is None:
             return
-        if not stat.S_ISDIR(git_metadata.st_mode):
-            return
-
-        git_fd = os.open(".git", _directory_flags(), dir_fd=root_fd)
+        normal_git_dir = self.root / ".git"
+        if directories.worktree == normal_git_dir:
+            worktree_fd = os.open(".git", _directory_flags(), dir_fd=root_fd)
+        else:
+            worktree_fd = os.open(directories.worktree, _directory_flags())
         try:
-            opened_git_metadata = os.fstat(git_fd)
-            if not stat.S_ISDIR(opened_git_metadata.st_mode):
-                raise SecurityError(".git changed while fingerprinting")
-            git_signature = _metadata_signature(opened_git_metadata)
-            for name in ("config", "config.worktree"):
+            worktree_metadata = os.fstat(worktree_fd)
+            if not stat.S_ISDIR(worktree_metadata.st_mode):
+                raise SecurityError(".git worktree directory changed")
+            if directories.common == directories.worktree:
+                common_fd = os.dup(worktree_fd)
+            else:
+                common_fd = os.open(directories.common, _directory_flags())
+            try:
+                common_metadata = os.fstat(common_fd)
+                if not stat.S_ISDIR(common_metadata.st_mode):
+                    raise SecurityError(".git common directory changed")
                 self._capture_optional_git_entry(
-                    git_fd, name, (".git",), files, live_cache_keys
+                    common_fd, "config", (".git",), files, live_cache_keys
                 )
-            self._capture_hooks(git_fd, files, live_cache_keys)
-            self._capture_git_attributes(git_fd, files, live_cache_keys)
-            if _metadata_signature(os.fstat(git_fd)) != git_signature:
-                raise OSError(".git changed while fingerprinting")
+                self._capture_optional_git_entry(
+                    worktree_fd,
+                    "config.worktree",
+                    (".git",),
+                    files,
+                    live_cache_keys,
+                )
+                self._capture_hooks(common_fd, files, live_cache_keys)
+                self._capture_git_attributes(common_fd, files, live_cache_keys)
+                if _metadata_signature(os.fstat(common_fd)) != _metadata_signature(
+                    common_metadata
+                ):
+                    raise OSError(".git common directory changed while fingerprinting")
+                if _metadata_signature(
+                    os.fstat(worktree_fd)
+                ) != _metadata_signature(worktree_metadata):
+                    raise OSError(
+                        ".git worktree directory changed while fingerprinting"
+                    )
+            finally:
+                os.close(common_fd)
         finally:
-            os.close(git_fd)
+            os.close(worktree_fd)
 
     def _capture_optional_git_entry(
         self,
@@ -605,11 +740,30 @@ class WorkspaceFingerprinter:
 
         # Do not hash the mutable Git object/index database, but do bind local
         # configuration and executable hooks that can change command behavior.
-        git_dir = self.root / ".git"
-        git_controls: list[Path] = []
-        hooks = git_dir / "hooks"
-        if git_dir.is_dir() and not git_dir.is_symlink():
-            git_controls.extend([git_dir / "config", git_dir / "config.worktree"])
+        directories = _git_control_directories(self.root)
+        git_controls: list[tuple[Path, SafeWorkspace, str]] = []
+        if directories is not None:
+            worktree_workspace = SafeWorkspace(directories.worktree)
+            common_workspace = (
+                worktree_workspace
+                if directories.common == directories.worktree
+                else SafeWorkspace(directories.common)
+            )
+            git_controls.extend(
+                [
+                    (
+                        directories.common / "config",
+                        common_workspace,
+                        ".git/config",
+                    ),
+                    (
+                        directories.worktree / "config.worktree",
+                        worktree_workspace,
+                        ".git/config.worktree",
+                    ),
+                ]
+            )
+            hooks = directories.common / "hooks"
             try:
                 hooks_metadata = hooks.lstat()
             except FileNotFoundError:
@@ -617,8 +771,15 @@ class WorkspaceFingerprinter:
             if hooks_metadata is not None and stat.S_ISLNK(hooks_metadata.st_mode):
                 raise SecurityError(".git/hooks must not be a symbolic link")
             if hooks_metadata is not None and stat.S_ISDIR(hooks_metadata.st_mode):
-                git_controls.extend(self.workspace.iter_entries(hooks))
-            info = git_dir / "info"
+                git_controls.extend(
+                    (
+                        path,
+                        common_workspace,
+                        str(Path(".git/hooks") / path.relative_to(hooks)),
+                    )
+                    for path in common_workspace.iter_entries(hooks)
+                )
+            info = directories.common / "info"
             try:
                 info_metadata = info.lstat()
             except FileNotFoundError:
@@ -626,16 +787,21 @@ class WorkspaceFingerprinter:
             if info_metadata is not None and stat.S_ISLNK(info_metadata.st_mode):
                 raise SecurityError(".git/info must not be a symbolic link")
             if info_metadata is not None and stat.S_ISDIR(info_metadata.st_mode):
-                git_controls.append(info / "attributes")
-        for path in git_controls:
+                git_controls.append(
+                    (
+                        info / "attributes",
+                        common_workspace,
+                        ".git/info/attributes",
+                    )
+                )
+        for path, workspace, relative in git_controls:
             try:
                 path.lstat()
             except OSError:
                 continue
-            relative = str(path.relative_to(self.root))
             live_cache_keys.add(relative)
             files[relative] = _hash_entry(
-                path, self.workspace, relative, self.cache
+                path, workspace, relative, self.cache
             )
 
 

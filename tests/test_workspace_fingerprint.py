@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 from dataclasses import asdict, fields
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,28 @@ import mini_code_agent.workspace as workspace_module
 from mini_code_agent.security import SafeWorkspace, SecurityError
 from mini_code_agent.verification import capture_workspace_fingerprint
 from mini_code_agent.workspace import WorkspaceSnapshot
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=cwd, text=True, capture_output=True, check=True
+    )
+    return result.stdout.strip()
+
+
+def _create_linked_worktree(tmp_path: Path) -> tuple[Path, Path, Path]:
+    repository = tmp_path / "repository"
+    worktree = tmp_path / "linked-worktree"
+    repository.mkdir()
+    _git(repository, "init")
+    _git(repository, "config", "user.email", "tests@example.invalid")
+    _git(repository, "config", "user.name", "Test User")
+    (repository / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    _git(repository, "add", "tracked.txt")
+    _git(repository, "commit", "-m", "initial")
+    _git(repository, "worktree", "add", "-b", "linked-test", str(worktree))
+    git_dir = Path(_git(worktree, "rev-parse", "--absolute-git-dir"))
+    return repository, worktree, git_dir
 
 
 def test_snapshot_fingerprint_matches_legacy_digest(tmp_path: Path):
@@ -503,6 +526,90 @@ def test_non_directory_git_controls_match_fallback(tmp_path: Path):
     assert descriptor_snapshot.files == fallback_snapshot.files
     assert ".git/hooks" not in descriptor_snapshot.files
     assert ".git/info" not in descriptor_snapshot.files
+
+
+@pytest.mark.parametrize("use_descriptor", [True, False], ids=["descriptor", "fallback"])
+def test_linked_worktree_git_controls_are_captured_and_change_fingerprint(
+    tmp_path: Path, use_descriptor: bool
+):
+    repository, worktree, worktree_git_dir = _create_linked_worktree(tmp_path)
+    if use_descriptor and not workspace_module._descriptor_relative_scanning_available():
+        pytest.skip("descriptor-relative operations are unavailable")
+    common_git_dir = repository / ".git"
+    controls = {
+        ".git/config": common_git_dir / "config",
+        ".git/config.worktree": worktree_git_dir / "config.worktree",
+        ".git/hooks/review-hook": common_git_dir / "hooks" / "review-hook",
+        ".git/info/attributes": common_git_dir / "info" / "attributes",
+    }
+    controls[".git/config.worktree"].write_text(
+        "[test]\n\tworktree = one\n", encoding="utf-8"
+    )
+    controls[".git/hooks/review-hook"].write_text(
+        "#!/bin/sh\nexit 0\n", encoding="utf-8"
+    )
+    controls[".git/info/attributes"].write_text(
+        "*.review -diff\n", encoding="utf-8"
+    )
+    fingerprinter = workspace_module.WorkspaceFingerprinter(worktree)
+    fingerprinter._use_descriptor_relative_scanner = use_descriptor
+
+    snapshot = fingerprinter.capture()
+
+    assert set(controls) <= set(snapshot.files)
+    assert str(tmp_path) not in "\n".join(snapshot.files)
+    for index, (synthetic_key, control_path) in enumerate(controls.items()):
+        before = snapshot.fingerprint
+        with control_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"# fingerprint mutation {index}\n")
+        snapshot = fingerprinter.capture()
+        assert snapshot.fingerprint != before, synthetic_key
+
+
+@pytest.mark.skipif(
+    not workspace_module._descriptor_relative_scanning_available(),
+    reason="descriptor-relative operations are unavailable",
+)
+def test_linked_worktree_git_controls_match_between_scanners(tmp_path: Path):
+    repository, worktree, worktree_git_dir = _create_linked_worktree(tmp_path)
+    common_git_dir = repository / ".git"
+    (worktree_git_dir / "config.worktree").write_text(
+        "[test]\n\tworktree = one\n", encoding="utf-8"
+    )
+    (common_git_dir / "hooks" / "review-hook").write_text(
+        "#!/bin/sh\nexit 0\n", encoding="utf-8"
+    )
+    (common_git_dir / "info" / "attributes").write_text(
+        "*.review -diff\n", encoding="utf-8"
+    )
+    descriptor = workspace_module.WorkspaceFingerprinter(worktree)
+    descriptor._use_descriptor_relative_scanner = True
+    fallback = workspace_module.WorkspaceFingerprinter(worktree)
+    fallback._use_descriptor_relative_scanner = False
+
+    assert descriptor.capture().files == fallback.capture().files
+
+
+@pytest.mark.parametrize("use_descriptor", [True, False], ids=["descriptor", "fallback"])
+@pytest.mark.parametrize("control_name", ["hooks", "info"])
+def test_linked_worktree_symlinked_common_git_control_directories_fail_closed(
+    tmp_path: Path, use_descriptor: bool, control_name: str
+):
+    repository, worktree, _worktree_git_dir = _create_linked_worktree(tmp_path)
+    if use_descriptor and not workspace_module._descriptor_relative_scanning_available():
+        pytest.skip("descriptor-relative operations are unavailable")
+    control = repository / ".git" / control_name
+    original = repository / ".git" / f"{control_name}.original"
+    control.rename(original)
+    try:
+        control.symlink_to(original.name)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this platform")
+    fingerprinter = workspace_module.WorkspaceFingerprinter(worktree)
+    fingerprinter._use_descriptor_relative_scanner = use_descriptor
+
+    with pytest.raises(SecurityError, match=rf"\.git/{control_name}"):
+        fingerprinter.capture()
 
 
 @pytest.mark.parametrize("use_descriptor", [True, False], ids=["descriptor", "fallback"])
