@@ -2,7 +2,7 @@
 
 mini-code-agent-langgraph is a compact reference runtime for studying and extending coding-agent safety controls. Its controls reduce accidental damage and constrain model actions, but they do not make arbitrary repositories, commands, dependencies, containers, or model providers trustworthy.
 
-中文摘要：本项目采用最小权限、验证门、私有状态、签名撤销和 fail-closed 命令隔离作为纵深防御；它不是绝对安全沙箱。请勿在包含生产凭证或其他敏感资产的工作区中运行不受信任的代码。
+中文摘要：本项目采用最小权限、验证门、私有状态、HMAC 认证撤销和 fail-closed 命令隔离作为纵深防御；它不是绝对安全沙箱。请勿在包含生产凭证或其他敏感资产的工作区中运行不受信任的代码。
 
 ## Supported versions
 
@@ -78,7 +78,7 @@ The project does **not** guarantee:
 - correctness or completeness of user-supplied tests;
 - recovery of every external side effect when a process is killed between tool boundaries;
 - availability against denial-of-service, resource exhaustion outside configured limits, or provider outages;
-- protection after the local account, Python environment, dependency chain, signing key, or host is compromised.
+- protection after the local account, Python environment, dependency chain, local HMAC key material, or host is compromised.
 
 Flags such as `--sandbox none`, `--allow-shell`, `--allow-dirty`, `--yes`, `--force`, and `--allow-legacy-unsafe` deliberately weaken one or more controls. Use them only in disposable, credential-free workspaces after reviewing the consequence.
 

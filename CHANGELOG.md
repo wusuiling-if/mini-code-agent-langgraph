@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-20
+
 ### Changed
 
 - Decoupled shared runtime contracts, context management, and verification orchestration from the LangGraph agent implementation while preserving lightweight CLI startup.
@@ -41,5 +43,5 @@ All notable changes to this project are documented in this file. The format foll
 
 - Hardened workspace containment against path traversal, symbolic-link replacement, non-regular files, unsafe ownership, and broad secret-file permissions.
 - Reduced child-process environments and expanded best-effort secret-like value redaction while documenting that trajectories remain sensitive.
-- Added signed Undo integrity checks, resume schema validation, state-size limits, dirty-worktree protection, and trusted executable checks.
+- Added HMAC-authenticated, tamper-evident Undo integrity checks, resume schema validation, state-size limits, dirty-worktree protection, and trusted executable checks.
 - Documented that controls are defense in depth rather than an absolute sandbox, and that the full Agent runtime requires macOS, Linux, or WSL2 in `0.3.x`.
