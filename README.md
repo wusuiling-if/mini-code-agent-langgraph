@@ -29,7 +29,7 @@ mca demo
 mca doctor --cwd /path/to/repo --sandbox auto --provider auto
 ```
 
-`doctor` performs static prerequisite checks; `run` and `chat` perform the authoritative sandbox usability probe at startup. Doctor checks whether a provider key is present in the current process environment without printing its value, and inspects private env-file metadata without opening the file.
+`doctor` performs static prerequisite checks. `run` and coding-enabled `chat` sessions perform the authoritative sandbox usability probe at startup; a coding-enabled chat is one started with `--test-command`. An `/ask`-only chat started without `--test-command` skips the sandbox probe because it cannot run tests, shell commands, or coding tools. Doctor checks whether a provider key is present in the current process environment without printing its value, and inspects private env-file metadata without opening the file.
 
 ## Run and chat
 

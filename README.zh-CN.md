@@ -27,7 +27,7 @@ mca doctor --cwd /path/to/repo --sandbox auto --provider auto
 
 这条无 Key 诊断会把 provider 记为 warning 而不是失败。`mca demo` 当前支持 macOS、Linux 与 WSL2；原生 Windows 请使用 WSL2/Linux 环境运行完整 Agent。
 
-`doctor` 只静态检查 sandbox 可执行文件是否在 PATH；真正的 backend/daemon/image 可用性仍由 `run` 和 `chat` 启动时的 probe 决定。它只检查当前进程环境中是否存在 provider key，不会打印 key 值；对于私有 env 文件，它只检查元数据而不会打开文件。
+`doctor` 只静态检查 sandbox 可执行文件是否在 PATH。`run` 和启用了编码能力的 `chat` 会话会在启动时执行权威 sandbox 可用性 probe；这里“启用编码能力”指启动时传入了 `--test-command`。未提供 `--test-command` 的纯 `/ask` 会话会跳过 sandbox probe，因为它不能运行测试、shell 或编码工具。`doctor` 只检查当前进程环境中是否存在 provider key，不会打印 key 值；对于私有 env 文件，它只检查元数据而不会打开文件。
 
 ## 安全与可靠性边界
 
