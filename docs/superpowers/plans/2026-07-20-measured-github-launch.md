@@ -12,7 +12,7 @@
 
 - Production runtime behavior and runtime dependencies must not change.
 - The demo must execute the real `mca demo` command with the deterministic mock model, no provider call, and no API key.
-- The demo may show a randomized `/tmp/mca-demo-*` path; it must not show `/Users/Zhuanz`, another home path, repository secrets, or provider values.
+- The demo may show a randomized `/tmp/mca-demo-*` path; it must not show a user home path, repository secrets, or provider values.
 - The README must keep the no-key quickstart immediately after the demo and remain suitable as the PyPI long description.
 - The first screen must name exactly these differentiator classes: verification-bound submission, resumable/redacted trajectories, and HMAC-authenticated conflict-aware Undo.
 - HMAC must be described as authentication or tamper evidence, never as a digital signature or proof of semantic correctness.
@@ -381,42 +381,15 @@ Expected: version is `0.3.1`; help and doctor render; demo exits zero with `Subm
 ```bash
 git diff --check origin/main...HEAD
 git status --short
-.venv/bin/python - <<'PY'
-import re
-import subprocess
-
-diff = subprocess.check_output(
-    ["git", "diff", "--unified=0", "origin/main...HEAD", "--", ".", ":(exclude)docs/superpowers/**"],
-    text=True,
-)
-pattern = re.compile(
-    r"sk-[A-Za-z0-9_-]{12,}|(?:DEEPSEEK|OPENAI|MCA)_API_KEY=[^\s\"'`]+"
-)
-found = set(pattern.findall(diff))
-allowed_fixtures_and_templates = {
-    "DEEPSEEK_API_KEY=...",
-    "DEEPSEEK_API_KEY=default-private-key\\n",
-    "DEEPSEEK_API_KEY=not-inspected\\n",
-    "DEEPSEEK_API_KEY={secret}\\n",
-    "MCA_API_KEY=not-needed",
-    "MCA_API_KEY=not-needed\\n",
-    "OPENAI_API_KEY=...",
-    "sk-do-not-print",
-    "sk-do-not-read-or-print",
-    "sk-parent-secret-123456",
-    "sk-testsecret123456",
-}
-unexpected = found - allowed_fixtures_and_templates
-assert not unexpected, sorted(unexpected)
-print("approved synthetic candidates:", sorted(found))
-PY
+.venv/bin/python scripts/check_added_content.py
 git log --format='%H %s' origin/main..HEAD
 ```
 
 Expected: diff check exits zero; only intentional ignored build artifacts may
-exist; every candidate is one of the explicit synthetic test fixtures or
-documentation templates and `unexpected` is empty; history is linear and
-contains only scoped commits.
+exist; all tracked additions, including `docs/superpowers/**`, are scanned;
+every reported candidate matches an exact approved synthetic value, file, and
+line context; macOS and Linux user-home paths are rejected; history is linear
+and contains only scoped commits.
 
 - [ ] **Step 5: Obtain two-stage independent review**
 
