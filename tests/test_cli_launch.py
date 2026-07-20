@@ -136,7 +136,7 @@ def test_cli_reports_package_version_without_a_subcommand():
     )
 
     assert result.returncode == 0
-    assert result.stdout.strip() == "mca 0.3.1"
+    assert result.stdout.strip() == "mca 0.3.2"
     assert result.stderr == ""
 
 

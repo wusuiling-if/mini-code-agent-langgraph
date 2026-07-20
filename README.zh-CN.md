@@ -15,11 +15,7 @@
 ## 30 秒体验（无需 API Key）
 
 ```bash
-git clone https://github.com/wusuiling-if/mini-code-agent-langgraph.git
-cd mini-code-agent-langgraph
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
+python -m pip install mini-code-agent-langgraph
 mca demo
 ```
 
@@ -38,7 +34,7 @@ mca doctor --cwd /path/to/repo --sandbox auto --provider auto
 | 控制 | Runtime 强制行为 | 边界 |
 | --- | --- | --- |
 | 只读聊天 | `/ask` 只允许列目录、搜索、读文件和查看 diff；新增工具不会自动获得权限 | `/code` 是用户显式授予的编码能力，不代表模型输出一定正确 |
-| 验证门 | 修改后只有当前工作区指纹对应的权威测试通过，才允许 `submit` | 测试命令和测试覆盖率由用户负责配置 |
+| 验证门 | 修改后只有当前工作区指纹对应的权威测试通过，才允许 `submit`；识别到 0 个测试时默认拒绝 | 测试命令和测试覆盖率由用户负责配置；`--allow-zero-tests` 会显式削弱该门禁 |
 | 崩溃恢复 | run/chat 从完整工具边界恢复，并使恢复前的验证结果失效 | 被强制终止的外部命令可能已经产生部分副作用 |
 | HMAC 认证撤销 | 私有 Undo journal 以 HMAC 绑定轨迹、工作区、路径和内容 hash，并在覆盖前检查冲突 | HMAC 校验可检测本机 journal 是否被篡改，不证明修改在语义上安全 |
 | Fail-closed 隔离 | `auto` 实际探测后端；没有可用后端时拒绝执行命令，除非用户显式选择 `none` | macOS 使用 `sandbox-exec`，Linux 使用 `bwrap` 或 Docker；原生 Windows 的完整 Agent runtime 尚不支持 |
@@ -68,7 +64,7 @@ mca doctor --cwd /path/to/repo --sandbox auto --provider auto
 在本机长期使用至少需要：
 
 - Python 3.10+ 和项目虚拟环境
-- DeepSeek 或 OpenAI API Key；只跑 `--model mock` 不需要 Key
+- 真实 `run` / `chat` 需要 DeepSeek 或 OpenAI API Key；确定性的 `mca demo` 不需要 Key
 - 明确可用的隔离后端：macOS `sandbox-exec`、Linux `bwrap` 或 Docker；如果显式使用 `--sandbox none`，只应指向无凭证、可丢弃的可信目录
 - 原生 Windows 仅验证 `help`、`version`、`doctor` 和配置路径；`run`、`chat`、`demo` 及结构化文件工具请在 WSL2/Linux 中运行
 - 一个由用户预先配置的权威测试命令，例如 `python3 -m pytest -q`
@@ -78,7 +74,7 @@ mca doctor --cwd /path/to/repo --sandbox auto --provider auto
 
 ## 安装
 
-需要 Python 3.10 或更高版本；CI 当前覆盖 3.10–3.13。推荐使用独立虚拟环境。
+需要 Python 3.10 或更高版本；CI 当前覆盖 3.10–3.13。推荐使用独立虚拟环境。普通用户安装发布包：
 
 macOS / Linux：
 
@@ -86,8 +82,8 @@ macOS / Linux：
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
-python -m pip install -e ".[dev]"
-pytest -q
+python -m pip install mini-code-agent-langgraph
+mca demo
 ```
 
 Windows PowerShell：
@@ -96,13 +92,17 @@ Windows PowerShell：
 py -3.10 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip
-python -m pip install -e ".[dev]"
+python -m pip install mini-code-agent-langgraph
 mca --version
 mca --help
 mca doctor --sandbox none
 ```
 
 该原生 Windows 安装只承诺信息诊断命令；完整 Agent runtime 请从 WSL2/Linux 环境运行。
+
+### 源码开发
+
+克隆仓库、执行 `python -m pip install -e ".[dev]"` 和运行测试属于贡献者工作流，请按 [CONTRIBUTING.md](CONTRIBUTING.md) 配置源码开发环境；不要把 editable install 当作普通用户的首选安装路径。
 
 ## 无密钥本地验证
 
@@ -171,7 +171,10 @@ mca run "检查并修复失败测试" \
 DeepSeek 使用专用 `ChatDeepSeek` adapter，而不是把第三方 API 当成 OpenAI。适配器会保留并在工具调用后回传 `reasoning_content`。为获得稳定、成本可预测的工具循环，thinking 默认显式关闭；需要时传入：
 
 ```bash
-mca chat --model deepseek --deepseek-thinking --env-file ~/.config/mca.env
+mca chat --model deepseek \
+  --deepseek-thinking \
+  --env-file ~/.config/mca.env \
+  --test-command "python3 -m pytest"
 ```
 
 ### OpenAI / OpenAI-compatible
@@ -185,7 +188,8 @@ OPENAI_API_KEY=...
 mca chat \
   --model gpt-4.1-mini \
   --provider openai \
-  --env-file ~/.config/mca.env
+  --env-file ~/.config/mca.env \
+  --test-command "python3 -m pytest"
 ```
 
 本地兼容服务即使不验证密钥，也必须显式设置一个占位值，避免配置错误被推迟到请求阶段：
@@ -216,7 +220,7 @@ mca chat \
   --test-command "python3 -m pytest"
 ```
 
-会话默认进入 `/ask`：允许列目录、搜索、读文件和查看 diff，但运行 shell、测试或写文件会被 runtime 强制阻止，而不只是依赖提示词。
+会话默认进入 `/ask`：允许列目录、搜索、读文件和查看 diff，但运行 shell、测试或写文件会被 runtime 强制阻止，而不只是依赖提示词。如果启动时不传 `--test-command`，该会话只能使用 `/ask`，`/code` 会被阻止；所有编码会话都应显式配置权威测试命令。
 
 ```text
 /ask              切换到只读聊天
@@ -234,7 +238,8 @@ mca chat \
 ```bash
 mca chat --resume /path/to/session.chat.json \
   --model deepseek \
-  --env-file ~/.config/mca.env
+  --env-file ~/.config/mca.env \
+  --test-command "python3 -m pytest"
 ```
 
 恢复后默认重新进入 `/ask`，不会静默继承 `/code` 授权。
@@ -301,8 +306,10 @@ Undo 原始恢复内容保存在状态根目录的私有 `undo/` 中，使用 `0
 - shell 默认关闭，测试命令和子进程使用收敛后的环境
 - shell/test 子进程在超时、Ctrl-C、SIGTERM 和异常后回收整个进程组；Docker 运行使用唯一 name/cidfile 并在退出时强制清理
 - `mca run` 即使没有检测到文件变化，也必须至少通过一次用户配置的权威测试才能提交
+- `mca run` 要求显式传入 `--model` 和 `--test-command`，并拒绝 `--model mock`；无 Key 的确定性流程请使用 `mca demo`
 - 工作区指纹覆盖内容、文件类型、权限位、symlink target、依赖目录及 Git 本地配置/hooks；缓存目录和易变 Git 数据库除外
 - 模型不能覆盖 `--test-command`；失败的权威测试、改变工作区指纹的后续操作以及 resume 会使旧验证失效
+- 权威命令被识别为 0 个测试时默认不能通过验证；`--allow-zero-tests` 会允许它通过，是需要用户明确接受的验证弱化
 - `/ask` 使用只读工具允许列表；未来新增工具不会被默认放行
 - 工具输出、搜索、结构化编辑、tool-call 数量、持久对话和 `reasoning_content` 都有资源上限；状态文件读写共享 256 MiB 硬上限，可用 `--context-chars` 调整上下文预算
 - 启动时实际探测沙箱能力；`auto` 会按顺序尝试本机后端，某个后端存在但不可运行时继续尝试下一个，全部失败才拒绝启动
@@ -333,7 +340,7 @@ src/mini_code_agent/security.py    路径与密钥安全
 src/mini_code_agent/cli.py         CLI、状态目录与授权模式
 ```
 
-## 测试
+## 测试与离线 benchmark
 
 ```bash
 pytest -q
@@ -341,7 +348,15 @@ python -m pip check
 python -m evals.run_evals --json
 ```
 
-`evals/run_evals.py` 是无需 API Key 的确定性行为基线，覆盖单文件修复、无需修改的解释任务，以及失败修改后的恢复。它输出 JSON 指标，包括成功率、验证率、步骤、工具调用数、耗时和无关改动数；任一 case 失败时返回非零退出码。
+从源码 checkout 的仓库根目录精确复现 v0.3.2 verified-patch 基线：
+
+```bash
+.venv/bin/python -m evals.run_evals --json
+```
+
+这 11 个 case 是：`single-file-fix`、`multi-file-fix`、`explain-only`、`failed-fix-recovery`、`premature-submission`、`stale-verification`、`failed-test-refusal`、`zero-test-refusal`、`shell-disabled`、`checkpoint-resume` 和 `authenticated-undo`。v0.3.2 基线为 **11/11 通过**：9 个已验证的提交、2 个符合预期的策略拒绝、0 个意外提交、0 个无关改动。
+
+这是使用本地脚本化决策生成的离线 runtime-policy 一致性证据。它**不衡量**模型质量、自主修复能力、provider 行为、真实项目任务成功率或 SWE-bench 成绩。
 
 可用以下命令测量安全工作区指纹的 cold/warm capture：
 

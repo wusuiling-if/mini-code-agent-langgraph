@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-20
+
+### Added
+
+- Added an eleven-case deterministic verified-patch benchmark covering single- and multi-file repair, explanation-only work, recovery, premature and stale verification, failed and zero-test refusal, disabled shell access, checkpoint resume, and authenticated Undo.
+- Added weekly Dependabot updates, dependency review, `pip-audit`, CodeQL analysis, immutable action pins, least-privilege workflow permissions, and retained sanitized evaluation artifacts.
+
+### Changed
+
+- Required `mca run` callers to select both a real model and an authoritative test command explicitly; deterministic no-key use now goes through `mca demo`.
+- Allowed `mca chat` to start without a test command only for read-only `/ask`; `/code` remains unavailable until authoritative verification is configured.
+
+### Fixed
+
+- Rejected missing test commands and recognized zero-test results as verification failures instead of accepting an empty test run; `--allow-zero-tests` is an explicit opt-out.
+- Bound submission evidence to the current workspace fingerprint and exact benchmark tool contracts, including real tracked-diff evidence.
+
+### Security
+
+- Hardened CI and release workflows with explicit timeouts, concurrency controls, artifact checks, SHA-pinned actions, dependency auditing, and static analysis.
+
 ## [0.3.1] - 2026-07-20
 
 ### Changed
