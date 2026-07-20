@@ -5,6 +5,7 @@ import builtins
 import io
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -181,11 +182,20 @@ def test_env_file_is_inspected_without_opening_or_exposing_contents(
     env_file.chmod(0o600)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "present-in-process")
 
-    def reject_open(*args: object, **kwargs: object) -> object:
-        raise AssertionError("diagnostics must not open the env file")
+    def guard_open(original_open: Callable[..., object]) -> Callable[..., object]:
+        def guarded_open(file: object, *args: object, **kwargs: object) -> object:
+            try:
+                opened_path = Path(file).resolve()  # type: ignore[arg-type]
+            except (OSError, TypeError):
+                opened_path = None
+            if opened_path == env_file.resolve():
+                raise AssertionError("diagnostics must not open the env file")
+            return original_open(file, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "open", reject_open)
-    monkeypatch.setattr(io, "open", reject_open)
+        return guarded_open
+
+    monkeypatch.setattr(builtins, "open", guard_open(builtins.open))
+    monkeypatch.setattr(io, "open", guard_open(io.open))
     checks = run_diagnostics(
         tmp_path,
         sandbox="none",
@@ -194,6 +204,7 @@ def test_env_file_is_inspected_without_opening_or_exposing_contents(
     )
 
     assert check_named(checks, "env").status == "pass"
+    assert check_named(checks, "package").status == "pass"
     assert secret not in "\n".join(check.detail for check in checks)
 
 
