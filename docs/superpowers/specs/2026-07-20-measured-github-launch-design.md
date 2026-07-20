@@ -190,4 +190,3 @@ CLI smoke tests, package build, and offline evaluation on the pushed commit.
 - third-party account actions;
 - paid acquisition, Star exchanges, or synthetic engagement;
 - a hard Star target for the first observation window.
-
