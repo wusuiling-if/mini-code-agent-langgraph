@@ -1,29 +1,60 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-code-agent-langgraph"
-version = "0.1.0"
-description = "A tiny LangGraph-based coding agent for learning agent loops, bash tool use, and trajectories."
+version = "0.3.1"
+description = "A secure, resumable LangGraph CLI agent for coding and persistent chat."
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "wusuiling-if" },
+]
+keywords = ["coding-agent", "langgraph", "llm", "cli", "security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
-    "langgraph",
-    "langchain-core",
-    "langchain-openai",
+    "langgraph>=1.0,<2",
+    "langchain-core>=1.4,<2",
+    "langchain-openai>=1.3,<2",
+    "langchain-deepseek>=1.1,<2",
+    "regex>=2024.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
+    "pytest>=8,<10",
 ]
 
 [project.scripts]
 mca = "mini_code_agent.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/wusuiling-if/mini-code-agent-langgraph"
+Repository = "https://github.com/wusuiling-if/mini-code-agent-langgraph"
+Issues = "https://github.com/wusuiling-if/mini-code-agent-langgraph/issues"
+Changelog = "https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]

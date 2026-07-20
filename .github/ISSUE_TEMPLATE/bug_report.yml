@@ -1,0 +1,108 @@
+name: Bug report
+description: Report a reproducible defect in the CLI, agent runtime, sandbox, state, or documentation.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Do not include API keys, private source, unredacted trajectories, or Undo journals.
+        Report security vulnerabilities privately through [GitHub Security Advisories](https://github.com/wusuiling-if/mini-code-agent-langgraph/security/advisories/new), not in this form.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: This is not a privately reportable security vulnerability.
+          required: true
+        - label: I removed or replaced every real secret and private artifact.
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Paste `mca --version` and, for a source checkout, the commit SHA.
+      placeholder: "mca 0.3.0 / abc1234"
+    validations:
+      required: true
+  - type: textarea
+    id: platform
+    attributes:
+      label: Platform and installation
+      description: Include OS/version, architecture, Python version, and pip/pipx/uv/editable installation method.
+      placeholder: "macOS 15 arm64, Python 3.12, editable install"
+    validations:
+      required: true
+  - type: dropdown
+    id: sandbox
+    attributes:
+      label: Selected sandbox
+      options:
+        - auto
+        - sandbox-exec
+        - bwrap
+        - docker
+        - none
+        - not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: sandbox_details
+    attributes:
+      label: Sandbox details
+      description: Include `mca doctor` status and, when relevant, Docker version/image. Redact paths or values that are sensitive.
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and provider
+      description: Show the redacted command, mode (`run`, `chat`, `/ask`, `/code`, `demo`, etc.), model/provider, and relevant flags.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Provide deterministic steps using a disposable repository or synthetic fixture.
+      placeholder: |
+        1. Create ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and redacted output
+      description: Paste the smallest useful output. Review it for keys, private code, home paths, and trajectory content first.
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Tests and diagnostics
+      description: List focused tests, `pytest -q`, offline eval, or doctor checks you ran and their results.
+  - type: dropdown
+    id: threat_model
+    attributes:
+      label: Does this affect the documented threat model or a fail-closed boundary?
+      options:
+        - "No"
+        - "Yes"
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: threat_model_detail
+    attributes:
+      label: Threat-model impact
+      description: If yes or unsure, identify the protected asset, untrusted input, and whether the failure appears fail-open.

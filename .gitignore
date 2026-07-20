@@ -1,7 +1,17 @@
 runs/
 tmp/
+.mca/
+*.traj.json
+*.chat.json
 .env
 .env.*
 .pytest_cache/
 __pycache__/
 *.pyc
+*.undo.json
+.venv/
+*.egg-info/
+build/
+dist/
+.DS_Store
+.worktrees/

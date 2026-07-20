@@ -1,3 +1,3 @@
-"""A tiny LangGraph-based coding agent."""
+"""A compact, security-first LangGraph coding-agent runtime."""
 
-__version__ = "0.1.0"
+__version__ = "0.3.1"

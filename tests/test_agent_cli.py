@@ -5,7 +5,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from langchain_core.messages import AIMessage
+
 from mini_code_agent.agent import MiniCodeAgent
+from mini_code_agent.chat import ConversationalCodeAgent
 from mini_code_agent.executor import BashExecutor
 from mini_code_agent.model import create_model
 from mini_code_agent.trajectory import load_trajectory, summarize_trajectory, undo_trajectory
@@ -39,7 +42,7 @@ def make_calculator_repo(root: Path) -> None:
 def test_mock_agent_fixes_bug_and_records_trajectory(tmp_path: Path):
     repo = tmp_path / "repo"
     make_calculator_repo(repo)
-    trajectory_path = tmp_path / "run.traj.json"
+    trajectory_path = repo / "runs" / "run.traj.json"
 
     agent = MiniCodeAgent(
         create_model("mock"),
@@ -133,7 +136,7 @@ def test_cli_trace_command(tmp_path: Path):
     assert "return a + b" in result.stdout
 
 
-def test_trajectory_json_has_reversible_content(tmp_path: Path):
+def test_trajectory_keeps_reversible_source_only_in_private_journal(tmp_path: Path):
     repo = tmp_path / "repo"
     make_calculator_repo(repo)
     trajectory_path = tmp_path / "run.traj.json"
@@ -146,5 +149,123 @@ def test_trajectory_json_has_reversible_content(tmp_path: Path):
     agent.run("Fix failing tests")
     data = json.loads(trajectory_path.read_text(encoding="utf-8"))
     edit_events = [event for event in data["events"] if event.get("tool") == "apply_patch"]
-    assert edit_events[0]["before_content"]
-    assert edit_events[0]["after_content"]
+    assert "before_content" not in edit_events[0]
+    assert "after_content" not in edit_events[0]
+    assert data["undo_journal"].startswith("state:")
+
+
+class VerificationGateModel:
+    def __init__(self):
+        self.call = 0
+
+    def bind_tools(self, tools):
+        return self
+
+    def invoke(self, messages):
+        self.call += 1
+        calls = {
+            1: ("apply_patch", {"path": "value.py", "old": "VALUE = 1", "new": "VALUE = 2"}),
+            2: ("submit", {"summary": "too early"}),
+            3: ("run_tests", {}),
+            4: ("submit", {"summary": "verified"}),
+        }
+        name, args = calls[self.call]
+        return AIMessage(
+            content=name,
+            tool_calls=[{"name": name, "args": args, "id": f"gate-{self.call}", "type": "tool_call"}],
+        )
+
+
+def test_agent_blocks_submit_until_latest_edit_is_verified(tmp_path: Path):
+    (tmp_path / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
+    agent = MiniCodeAgent(
+        VerificationGateModel(),
+        BashExecutor(
+            tmp_path,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            default_test_command="python3 -c 'print(\"ok\")'",
+        ),
+        quiet=True,
+    )
+    trajectory = agent.run("change value")
+    submit_events = [event for event in trajectory["events"] if event.get("tool") == "submit"]
+    assert submit_events[0]["blocked"] is True
+    assert submit_events[0]["exception_info"] == "VerificationRequired"
+    assert submit_events[1]["submitted"] is True
+    assert trajectory["verification_status"] == "passed"
+
+
+def test_private_undo_journal_restores_secret_and_preserves_existing_empty_file(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    secret = "sk-testsecret123456"
+    (repo / "secret.txt").write_text(secret + "\n", encoding="utf-8")
+    (repo / "empty.txt").write_text("", encoding="utf-8")
+    trajectory_path = tmp_path / "secret.traj.json"
+    executor = BashExecutor(repo, approval_mode="yolo", sandbox_mode="none")
+    secret_result = executor.apply_patch("secret.txt", secret, "replaced")
+    empty_result = executor.write_file("empty.txt", "now populated\n")
+
+    from mini_code_agent.trajectory import write_undo_journal
+
+    records = [
+        {
+            "path": result.file_path,
+            "existed_before": result.file_existed_before,
+            "before_content": result.before_content,
+            "before_hash": result.before_hash,
+            "after_hash": result.after_hash,
+        }
+        for result in [secret_result, empty_result]
+    ]
+    journal = write_undo_journal(trajectory_path, repo, records)
+    trajectory_path.write_text(
+        json.dumps({"cwd": str(repo), "undo_journal": journal, "events": []}), encoding="utf-8"
+    )
+    data = load_trajectory(trajectory_path)
+    undo_trajectory(data)
+    assert (repo / "secret.txt").read_text(encoding="utf-8") == secret + "\n"
+    assert (repo / "empty.txt").exists()
+    assert (repo / "empty.txt").read_text(encoding="utf-8") == ""
+
+
+class ChatAndCodeModel:
+    def __init__(self):
+        self.code_step = 0
+
+    def bind_tools(self, tools):
+        return self
+
+    def invoke(self, messages):
+        last_human = next(message for message in reversed(messages) if message.type == "human")
+        if last_human.content == "hello":
+            return AIMessage(content="hello back")
+        self.code_step += 1
+        calls = {
+            1: ("apply_patch", {"path": "note.txt", "old": "old", "new": "new"}),
+            2: ("run_tests", {}),
+            3: ("submit", {"summary": "updated note"}),
+        }
+        name, args = calls[self.code_step]
+        return AIMessage(
+            content=name,
+            tool_calls=[{"name": name, "args": args, "id": f"chat-{self.code_step}", "type": "tool_call"}],
+        )
+
+
+def test_chat_session_can_answer_normally_and_complete_a_coding_turn(tmp_path: Path):
+    (tmp_path / "note.txt").write_text("old\n", encoding="utf-8")
+    session = ConversationalCodeAgent(
+        ChatAndCodeModel(),
+        BashExecutor(
+            tmp_path,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            default_test_command="python3 -c 'print(\"ok\")'",
+        ),
+        quiet=True,
+    )
+    assert session.respond("hello") == "hello back"
+    assert session.respond("update the note") == "updated note"
+    assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "new\n"

@@ -1,0 +1,69 @@
+name: Feature request
+description: Propose a focused improvement with developer value and explicit security boundaries.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The project is intentionally a compact, security-first reference runtime. Explain the underlying developer problem before proposing implementation breadth.
+        Never include real credentials, private repository content, or unredacted trajectories.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues and the changelog for this request.
+          required: true
+        - label: I reviewed the project scope and security policy.
+          required: true
+        - label: This request contains no real secret or private artifact.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Developer problem
+      description: Describe the blocked workflow or measurable limitation without assuming a specific implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe the smallest user-visible behavior that would solve the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include existing commands, external tools, or a narrower design and why they are insufficient.
+    validations:
+      required: true
+  - type: textarea
+    id: platform
+    attributes:
+      label: Platform, provider, and sandbox scope
+      description: State which OS, provider/model, CLI mode, and sandbox backends the feature must support.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Threat-model and safety impact
+      description: Identify new untrusted inputs, protected assets, permissions, external side effects, fail-open risks, and any high-risk flag interaction. Write `none` only with an explanation.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Tests and evaluation plan
+      description: Describe deterministic unit/integration tests, platform/sandbox coverage, and any offline evaluation acceptance criteria.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Out of scope
+      description: List adjacent work that should remain deferred so the change stays reviewable.
