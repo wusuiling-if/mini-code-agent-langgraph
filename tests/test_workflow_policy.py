@@ -1,6 +1,8 @@
 from pathlib import Path
 import re
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DIRECTORY = ROOT / ".github" / "workflows"
@@ -28,8 +30,15 @@ def _required_file(relative_path: str) -> Path:
     return path
 
 
+def _workflow_paths(directory: Path | None = None) -> tuple[Path, ...]:
+    directory = WORKFLOW_DIRECTORY if directory is None else directory
+    return tuple(sorted({*directory.glob("*.yml"), *directory.glob("*.yaml")}))
+
+
 def _workflow(name: str) -> str:
-    return _required_file(f".github/workflows/{name}").read_text(encoding="utf-8")
+    workflows = {path.name: path for path in _workflow_paths()}
+    assert name in workflows, f"required workflow is missing: {name}"
+    return workflows[name].read_text(encoding="utf-8")
 
 
 def _workflow_prefix(workflow: str) -> str:
@@ -50,6 +59,35 @@ def _job_blocks(workflow: str) -> dict[str, str]:
     }
 
 
+def _mapping_block(
+    text: str,
+    name: str,
+    *,
+    header_indent: int,
+    entry_indent: int,
+) -> dict[str, str]:
+    lines = text.splitlines()
+    header = f"{' ' * header_indent}{name}:"
+    header_indexes = [index for index, line in enumerate(lines) if line == header]
+    assert len(header_indexes) == 1, f"expected exactly one {name} block"
+
+    values: dict[str, str] = {}
+    for line in lines[header_indexes[0] + 1 :]:
+        if not line.strip():
+            continue
+        indentation = len(line) - len(line.lstrip(" "))
+        if indentation <= header_indent:
+            break
+        assert indentation == entry_indent, f"invalid indentation in {name} block"
+        key, separator, raw_value = line[entry_indent:].partition(":")
+        assert separator and key and raw_value.strip(), f"invalid entry in {name} block"
+        assert key not in values, f"duplicate {name} key: {key}"
+        values[key] = raw_value.strip()
+
+    assert values, f"{name} block must not be empty"
+    return values
+
+
 def _assert_trigger_has_main_branch(workflow: str, event: str) -> None:
     prefix = _workflow_prefix(workflow)
     event_match = re.search(
@@ -60,14 +98,8 @@ def _assert_trigger_has_main_branch(workflow: str, event: str) -> None:
     assert re.search(r"(?m)^    branches:\s*\[main\]\s*$", event_match.group("body"))
 
 
-def test_required_supply_chain_files_exist():
-    assert {path.name for path in WORKFLOW_DIRECTORY.glob("*.yml")} == EXPECTED_WORKFLOWS
-    _required_file(".github/dependabot.yml")
-    _required_file("requirements-ci.txt")
-
-
-def test_all_workflow_actions_use_only_reviewed_immutable_shas():
-    for path in sorted(WORKFLOW_DIRECTORY.glob("*.yml")):
+def _assert_reviewed_action_pins(directory: Path | None = None) -> None:
+    for path in _workflow_paths(directory):
         workflow = path.read_text(encoding="utf-8")
         uses_values = re.findall(r"(?m)^\s*(?:-\s*)?uses:\s*([^\s#]+)", workflow)
         for uses_value in uses_values:
@@ -78,17 +110,64 @@ def test_all_workflow_actions_use_only_reviewed_immutable_shas():
             assert sha == APPROVED_ACTIONS[action], f"{path.name} uses unreviewed SHA for {action}"
 
 
-def test_workflows_reject_privileged_pull_request_target_and_default_read_only():
-    for path in sorted(WORKFLOW_DIRECTORY.glob("*.yml")):
+def _assert_default_permissions_are_read_only() -> None:
+    for path in _workflow_paths():
         workflow = path.read_text(encoding="utf-8")
         assert "pull_request_target" not in workflow
         prefix = _workflow_prefix(workflow)
-        permissions = re.search(
-            r"(?ms)^permissions:\n(?P<body>(?:  [^\n]+\n?)*)",
+        assert _mapping_block(
             prefix,
-        )
-        assert permissions, f"{path.name} needs top-level permissions"
-        assert permissions.group("body").strip() == "contents: read"
+            "permissions",
+            header_indent=0,
+            entry_indent=2,
+        ) == {"contents": "read"}, f"{path.name} needs read-only default permissions"
+
+
+def _assert_codeql_permissions_are_narrow(workflow: str) -> None:
+    analysis = _job_blocks(workflow)["analysis"]
+    assert _mapping_block(
+        analysis,
+        "permissions",
+        header_indent=4,
+        entry_indent=6,
+    ) == {"contents": "read", "security-events": "write"}
+    assert workflow.count("security-events: write") == 1
+
+
+def _assert_release_permissions_are_narrow(workflow: str) -> None:
+    jobs = _job_blocks(workflow)
+    assert _mapping_block(
+        jobs["publish"],
+        "permissions",
+        header_indent=4,
+        entry_indent=6,
+    ) == {"id-token": "write"}
+    assert "id-token: write" not in jobs["build"]
+    assert workflow.count("id-token: write") == 1
+
+
+def test_required_supply_chain_files_exist():
+    assert {path.name for path in _workflow_paths()} == EXPECTED_WORKFLOWS
+    _required_file(".github/dependabot.yml")
+    _required_file("requirements-ci.txt")
+
+
+def test_all_workflow_actions_use_only_reviewed_immutable_shas():
+    _assert_reviewed_action_pins()
+
+
+def test_yaml_workflow_cannot_bypass_action_pin_policy(tmp_path):
+    (tmp_path / "bypass.yaml").write_text(
+        "name: bypass\njobs:\n  unsafe:\n    steps:\n      - uses: attacker/action@v1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match="mutable or malformed action"):
+        _assert_reviewed_action_pins(tmp_path)
+
+
+def test_workflows_reject_privileged_pull_request_target_and_default_read_only():
+    _assert_default_permissions_are_read_only()
 
 
 def test_every_job_has_an_explicit_timeout():
@@ -199,22 +278,23 @@ def test_codeql_is_python_only_main_and_monday_with_narrow_write_permission():
     assert cron.group(1).split()[4] == "1", "CodeQL schedule must run on Monday"
 
     analysis = _job_blocks(workflow)["analysis"]
-    job_permissions = re.search(
-        r"(?ms)^    permissions:\n(?P<body>(?:      [^\n]+\n?)*)",
-        analysis,
-    )
-    assert job_permissions
-    assert set(job_permissions.group("body").split()) == {
-        "contents:",
-        "read",
-        "security-events:",
-        "write",
-    }
-    assert workflow.count("security-events: write") == 1
+    _assert_codeql_permissions_are_narrow(workflow)
     assert "languages: python" in analysis
     assert "build-mode: none" in analysis
     assert "github/codeql-action/init@" in analysis
     assert "github/codeql-action/analyze@" in analysis
+
+
+def test_codeql_permission_policy_rejects_duplicate_write_scope():
+    workflow = _workflow("codeql.yml")
+    mutated = workflow.replace(
+        "      contents: read\n      security-events: write",
+        "      contents: read\n      security-events: write\n      contents: write",
+    )
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
+        _assert_codeql_permissions_are_narrow(mutated)
 
 
 def test_release_permissions_and_gates_remain_narrow():
@@ -234,6 +314,16 @@ def test_release_permissions_and_gates_remain_narrow():
     assert 'expected = f"v{version}"' in build
     assert "needs: build" in publish
     assert "actions/download-artifact@" in publish
-    assert re.search(r"(?m)^    permissions:\n      id-token:\s*write\s*$", publish)
-    assert "id-token: write" not in build
-    assert workflow.count("id-token: write") == 1
+    _assert_release_permissions_are_narrow(workflow)
+
+
+def test_release_permission_policy_rejects_appended_write_scope():
+    workflow = _workflow("release.yml")
+    mutated = workflow.replace(
+        "      id-token: write",
+        "      id-token: write\n      contents: write",
+    )
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
+        _assert_release_permissions_are_narrow(mutated)
