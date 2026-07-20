@@ -1,8 +1,8 @@
 # mini-code-agent-langgraph
 
-> A compact, security-first LangGraph coding agent with verified patches, crash recovery, and signed undo.
+> A compact, security-first LangGraph coding agent with verified patches, crash recovery, and HMAC-authenticated undo.
 
-[中文详细指南](README.zh-CN.md) · [Security policy](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
+[中文详细指南](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/README.zh-CN.md) · [Security policy](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/SECURITY.md) · [Contributing](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CONTRIBUTING.md) · [Changelog](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CHANGELOG.md)
 
 `mini-code-agent-langgraph` is a single-process, line-oriented CLI and REPL for studying, auditing, and extending a constrained coding-agent loop. It is not a full-screen TUI or web application.
 
@@ -23,11 +23,11 @@ mca demo
 mca doctor --cwd /path/to/repo --sandbox auto --provider auto
 ```
 
-`doctor` performs static prerequisite checks; `run` and `chat` perform the authoritative sandbox usability probe at startup.
+`doctor` performs static prerequisite checks; `run` and `chat` perform the authoritative sandbox usability probe at startup. Doctor checks whether a provider key is present in the current process environment without printing its value, and inspects private env-file metadata without opening the file.
 
 ## Run and chat
 
-Create a private environment-file template with `mca init`, then use a DeepSeek or OpenAI-compatible provider for a real task:
+Create a private environment-file template with `mca init`, populate it with a provider key, then use a DeepSeek or OpenAI-compatible provider for a real task:
 
 ```bash
 mca init
@@ -53,7 +53,7 @@ mca undo /path/to/run.traj.json --dry-run
 - `--sandbox auto` fails closed if no usable backend is found. `--sandbox none`, `--allow-shell`, `--allow-dirty`, `--yes`, and force/legacy Undo options deliberately weaken protections.
 - Native Windows supports informational CLI and configuration paths only. Run the full agent, structured tools, and `mca demo` from macOS, Linux, or WSL2. macOS uses `sandbox-exec`; Linux uses `bwrap` or Docker when available.
 
-These controls are defense in depth, not a guarantee that an untrusted repository, command, dependency, image, host, or provider is safe. Do not run it in a workspace containing production credentials. Read the complete [security policy](SECURITY.md) before use.
+These controls are defense in depth, not a guarantee that an untrusted repository, command, dependency, image, host, or provider is safe. Do not run it in a workspace containing production credentials. Read the complete [security policy](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/SECURITY.md) before use.
 
 ## Project structure
 
@@ -79,4 +79,4 @@ mca doctor --sandbox none
 mca demo
 ```
 
-`mca doctor --sandbox none` is a read-only configuration smoke test and intentionally reports an isolation warning. Skip `mca demo` on native Windows and run it from WSL2 instead. For contribution and release expectations, see [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
+`mca doctor --sandbox none` is a read-only configuration smoke test and intentionally reports an isolation warning. Skip `mca demo` on native Windows and run it from WSL2 instead. For contribution and release expectations, see [CONTRIBUTING.md](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CONTRIBUTING.md) and [CHANGELOG.md](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CHANGELOG.md).

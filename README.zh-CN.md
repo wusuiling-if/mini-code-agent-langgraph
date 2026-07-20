@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-> **A compact, security-first LangGraph coding agent with verified patches, crash recovery, and signed undo.**
+> **A compact, security-first LangGraph coding agent with verified patches, crash recovery, and HMAC-authenticated undo.**
 
 一个面向学习、审计与扩展的安全优先 LangGraph 编程 Agent：既能执行一次性编码任务，也能在持续会话中聊天、读代码、修改文件和运行验证。它是单进程的**行式 CLI / REPL**，不是全屏 TUI；“compact”描述部署与理解成本，不代表它拥有极小的第三方依赖栈。
 
@@ -31,7 +31,7 @@ mca doctor --cwd /path/to/repo --sandbox auto --provider auto
 
 这条无 Key 诊断会把 provider 记为 warning 而不是失败。`mca demo` 当前支持 macOS、Linux 与 WSL2；原生 Windows 请使用 WSL2/Linux 环境运行完整 Agent。
 
-`doctor` 只静态检查 sandbox 可执行文件是否在 PATH；真正的 backend/daemon/image 可用性仍由 `run` 和 `chat` 启动时的 probe 决定。
+`doctor` 只静态检查 sandbox 可执行文件是否在 PATH；真正的 backend/daemon/image 可用性仍由 `run` 和 `chat` 启动时的 probe 决定。它只检查当前进程环境中是否存在 provider key，不会打印 key 值；对于私有 env 文件，它只检查元数据而不会打开文件。
 
 ## 安全与可靠性边界
 
@@ -40,7 +40,7 @@ mca doctor --cwd /path/to/repo --sandbox auto --provider auto
 | 只读聊天 | `/ask` 只允许列目录、搜索、读文件和查看 diff；新增工具不会自动获得权限 | `/code` 是用户显式授予的编码能力，不代表模型输出一定正确 |
 | 验证门 | 修改后只有当前工作区指纹对应的权威测试通过，才允许 `submit` | 测试命令和测试覆盖率由用户负责配置 |
 | 崩溃恢复 | run/chat 从完整工具边界恢复，并使恢复前的验证结果失效 | 被强制终止的外部命令可能已经产生部分副作用 |
-| 签名撤销 | 私有 Undo journal 以 HMAC 绑定轨迹、工作区、路径和内容 hash，并在覆盖前检查冲突 | 签名证明本机 journal 完整性，不证明修改在语义上安全 |
+| HMAC 认证撤销 | 私有 Undo journal 以 HMAC 绑定轨迹、工作区、路径和内容 hash，并在覆盖前检查冲突 | HMAC 校验可检测本机 journal 是否被篡改，不证明修改在语义上安全 |
 | Fail-closed 隔离 | `auto` 实际探测后端；没有可用后端时拒绝执行命令，除非用户显式选择 `none` | macOS 使用 `sandbox-exec`，Linux 使用 `bwrap` 或 Docker；原生 Windows 的完整 Agent runtime 尚不支持 |
 | 进程清理 | 超时、Ctrl-C、SIGTERM 和异常后回收命令进程组及本次 Docker 容器 | 宿主内核、Docker daemon 或依赖链失陷不在保证范围内 |
 
@@ -122,7 +122,7 @@ Demo 不需要 API Key，也不会修改仓库中的 `examples/calculator_bug`�
 mca init
 ```
 
-之后 `mca run` 和 `mca chat` 会自动加载这个默认文件；只有使用其他位置时才需要传 `--env-file`。
+使用真实 provider 前，请先在生成的文件中填入 provider key。之后 `mca run` 和 `mca chat` 会自动加载这个默认文件；只有使用其他位置时才需要传 `--env-file`。
 
 默认路径：
 
@@ -277,7 +277,7 @@ mca run --resume /path/to/run.traj.json \
 
 Undo 原始恢复内容保存在状态根目录的私有 `undo/` 中，使用 `0600` 文件和本机密钥的 HMAC-SHA256 绑定 trajectory、工作区、路径及前后 hash。Trajectory 仍可能包含源代码、提示、读取结果和命令输出；脱敏只是纵深防御，任何 trajectory 都应按敏感文件处理，不能直接公开分享。撤销前会检查文件是否在 Agent 修改后再次变化；发生冲突时默认拒绝覆盖，只有明确接受风险时才使用 `--force`。
 
-0.1/0.2 的 unsigned undo 数据默认拒绝写文件。确实检查并信任旧文件后，才可显式使用 `--allow-legacy-unsafe`。
+0.1/0.2 中未经过 HMAC 认证的旧版 Undo 数据默认拒绝写文件。确实检查并信任旧文件后，才可显式使用 `--allow-legacy-unsafe`。
 
 ## 工具与安全边界
 
