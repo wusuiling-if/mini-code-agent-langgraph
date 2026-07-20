@@ -89,6 +89,8 @@ def _validated_git_directory(base: Path, value: str, label: str) -> Path:
     candidate = Path(os.path.abspath(candidate))
     current = Path(candidate.anchor)
     start = 1 if candidate.anchor else 0
+    if not candidate.parts[start:]:
+        raise SecurityError(f"{label} must not reference a filesystem anchor")
     try:
         for part in candidate.parts[start:]:
             current /= part

@@ -528,6 +528,100 @@ def test_non_directory_git_controls_match_fallback(tmp_path: Path):
     assert ".git/info" not in descriptor_snapshot.files
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX filesystem anchor required")
+@pytest.mark.parametrize("use_descriptor", [True, False], ids=["descriptor", "fallback"])
+def test_git_pointer_rejects_anchor_only_administrative_directory(
+    tmp_path: Path, use_descriptor: bool
+):
+    if use_descriptor and not workspace_module._descriptor_relative_scanning_available():
+        pytest.skip("descriptor-relative operations are unavailable")
+    (tmp_path / ".git").write_text("gitdir: /\n", encoding="utf-8")
+    fingerprinter = workspace_module.WorkspaceFingerprinter(tmp_path)
+    fingerprinter._use_descriptor_relative_scanner = use_descriptor
+
+    with pytest.raises(
+        SecurityError, match=r"\.git gitdir.*filesystem anchor"
+    ) as caught:
+        fingerprinter.capture()
+
+    assert str(tmp_path) not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("pointer", "message"),
+    [
+        (b"not-a-git-pointer\n", "valid linked-worktree pointer"),
+        (b"gitdir: /tmp\nunexpected second line\n", "malformed"),
+    ],
+    ids=["malformed", "multiline"],
+)
+def test_git_pointer_rejects_malformed_metadata_without_path_leakage(
+    tmp_path: Path, pointer: bytes, message: str
+):
+    (tmp_path / ".git").write_bytes(pointer)
+
+    with pytest.raises(SecurityError, match=message) as caught:
+        workspace_module.WorkspaceFingerprinter(tmp_path).capture()
+
+    assert str(tmp_path) not in str(caught.value)
+
+
+def test_git_pointer_rejects_oversized_metadata_without_path_leakage(tmp_path: Path):
+    (tmp_path / ".git").write_bytes(b"gitdir: " + b"x" * 65536)
+
+    with pytest.raises(SecurityError, match=r"\.git is too large") as caught:
+        workspace_module.WorkspaceFingerprinter(tmp_path).capture()
+
+    assert str(tmp_path) not in str(caught.value)
+
+
+def test_git_pointer_rejects_invalid_utf8_without_path_leakage(tmp_path: Path):
+    (tmp_path / ".git").write_bytes(b"gitdir: \xff\n")
+
+    with pytest.raises(SecurityError, match=r"\.git is not valid UTF-8") as caught:
+        workspace_module.WorkspaceFingerprinter(tmp_path).capture()
+
+    assert str(tmp_path) not in str(caught.value)
+
+
+def test_git_pointer_rejects_symlinked_administrative_path_component(
+    tmp_path: Path,
+):
+    workspace = tmp_path / "workspace"
+    real_parent = tmp_path / "real-parent"
+    administrative_directory = real_parent / "worktrees" / "linked"
+    workspace.mkdir()
+    administrative_directory.mkdir(parents=True)
+    symlinked_parent = tmp_path / "symlinked-parent"
+    try:
+        symlinked_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this platform")
+    (workspace / ".git").write_text(
+        f"gitdir: {symlinked_parent / 'worktrees' / 'linked'}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SecurityError, match="must not traverse symbolic links") as caught:
+        workspace_module.WorkspaceFingerprinter(workspace).capture()
+
+    assert str(tmp_path) not in str(caught.value)
+
+
+def test_linked_worktree_rejects_commondir_backlink_mismatch_without_path_leakage(
+    tmp_path: Path,
+):
+    _repository, worktree, worktree_git_dir = _create_linked_worktree(tmp_path)
+    (worktree_git_dir / "gitdir").write_text(
+        str(tmp_path / "different-worktree" / ".git") + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(SecurityError, match="back-reference does not match") as caught:
+        workspace_module.WorkspaceFingerprinter(worktree).capture()
+
+    assert str(tmp_path) not in str(caught.value)
+
+
 @pytest.mark.parametrize("use_descriptor", [True, False], ids=["descriptor", "fallback"])
 def test_linked_worktree_git_controls_are_captured_and_change_fingerprint(
     tmp_path: Path, use_descriptor: bool
