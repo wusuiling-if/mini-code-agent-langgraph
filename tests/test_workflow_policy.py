@@ -1,7 +1,10 @@
 from pathlib import Path
 import re
+import sys
 
 import pytest
+import yaml
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +24,10 @@ APPROVED_ACTIONS = {
     "github/codeql-action/init": "7188fc363630916deb702c7fdcf4e481b751f97a",
     "github/codeql-action/analyze": "7188fc363630916deb702c7fdcf4e481b751f97a",
     "pypa/gh-action-pypi-publish": "ba38be9e461d3875417946c167d0b5f3d385a247",
+}
+JOB_PERMISSION_EXCEPTIONS = {
+    ("codeql.yml", "analysis"): {"contents": "read", "security-events": "write"},
+    ("release.yml", "publish"): {"id-token": "write"},
 }
 
 
@@ -59,34 +66,51 @@ def _job_blocks(workflow: str) -> dict[str, str]:
     }
 
 
-def _mapping_block(
-    text: str,
-    name: str,
-    *,
-    header_indent: int,
-    entry_indent: int,
-) -> dict[str, str]:
-    lines = text.splitlines()
-    header = f"{' ' * header_indent}{name}:"
-    header_indexes = [index for index, line in enumerate(lines) if line == header]
-    assert len(header_indexes) == 1, f"expected exactly one {name} block"
+def _compose_workflow(workflow: str, label: str) -> MappingNode:
+    try:
+        documents = tuple(yaml.compose_all(workflow, Loader=yaml.SafeLoader))
+    except yaml.YAMLError as exc:
+        raise AssertionError(f"{label} must contain valid YAML") from exc
+    assert len(documents) == 1, f"{label} must contain exactly one YAML document"
+    document = documents[0]
+    assert isinstance(document, MappingNode), f"{label} root must be a mapping"
+    return document
 
-    values: dict[str, str] = {}
-    for line in lines[header_indexes[0] + 1 :]:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        indentation = len(line) - len(line.lstrip(" "))
-        if indentation <= header_indent:
-            break
-        assert indentation == entry_indent, f"invalid indentation in {name} block"
-        key, separator, raw_value = line[entry_indent:].partition(":")
-        assert separator and key and raw_value.strip(), f"invalid entry in {name} block"
-        assert key not in values, f"duplicate {name} key: {key}"
-        values[key] = raw_value.strip()
 
-    assert values, f"{name} block must not be empty"
+def _node_mapping(node: Node, context: str) -> dict[str, Node]:
+    assert isinstance(node, MappingNode), f"{context} must be a mapping"
+    values: dict[str, Node] = {}
+    for key_node, value_node in node.value:
+        assert isinstance(key_node, ScalarNode), f"{context} keys must be scalar"
+        key = key_node.value
+        assert key != "<<", f"{context} must not use YAML merge keys"
+        assert key not in values, f"duplicate {context} key: {key}"
+        values[key] = value_node
     return values
+
+
+def _node_sequence(node: Node, context: str) -> tuple[Node, ...]:
+    assert isinstance(node, SequenceNode), f"{context} must be a sequence"
+    return tuple(node.value)
+
+
+def _scalar_value(node: Node, context: str) -> str:
+    assert isinstance(node, ScalarNode), f"{context} must be a scalar"
+    return node.value
+
+
+def _scalar_mapping(node: Node, context: str) -> dict[str, str]:
+    return {
+        key: _scalar_value(value_node, f"{context}.{key}")
+        for key, value_node in _node_mapping(node, context).items()
+    }
+
+
+def _workflow_nodes(workflow: str, label: str) -> tuple[dict[str, Node], dict[str, Node]]:
+    root = _node_mapping(_compose_workflow(workflow, label), f"{label} root")
+    assert "jobs" in root, f"{label} must define jobs"
+    jobs = _node_mapping(root["jobs"], f"{label} jobs")
+    return root, jobs
 
 
 def _assert_trigger_has_main_branch(workflow: str, event: str) -> None:
@@ -99,52 +123,76 @@ def _assert_trigger_has_main_branch(workflow: str, event: str) -> None:
     assert re.search(r"(?m)^    branches:\s*\[main\]\s*$", event_match.group("body"))
 
 
+def _assert_reviewed_action(value_node: Node, context: str) -> None:
+    uses_value = _scalar_value(value_node, f"{context} uses")
+    match = re.fullmatch(r"([^@]+)@([0-9a-f]{40})", uses_value)
+    assert match, f"{context} has a mutable or malformed action: {uses_value}"
+    action, sha = match.groups()
+    assert action in APPROVED_ACTIONS, f"{context} uses unapproved action: {action}"
+    assert sha == APPROVED_ACTIONS[action], f"{context} uses unreviewed SHA for {action}"
+
+
 def _assert_reviewed_action_pins(directory: Path | None = None) -> None:
     for path in _workflow_paths(directory):
         workflow = path.read_text(encoding="utf-8")
-        uses_values = re.findall(r"(?m)^\s*(?:-\s*)?uses:\s*([^\s#]+)", workflow)
-        for uses_value in uses_values:
-            match = re.fullmatch(r"([^@]+)@([0-9a-f]{40})", uses_value)
-            assert match, f"{path.name} has a mutable or malformed action: {uses_value}"
-            action, sha = match.groups()
-            assert action in APPROVED_ACTIONS, f"{path.name} uses unapproved action: {action}"
-            assert sha == APPROVED_ACTIONS[action], f"{path.name} uses unreviewed SHA for {action}"
+        _, jobs = _workflow_nodes(workflow, path.name)
+        for job_name, job_node in jobs.items():
+            job_context = f"{path.name} job {job_name}"
+            job = _node_mapping(job_node, job_context)
+            if "uses" in job:
+                _assert_reviewed_action(job["uses"], job_context)
+            if "steps" not in job:
+                continue
+            for index, step_node in enumerate(
+                _node_sequence(job["steps"], f"{job_context} steps")
+            ):
+                step_context = f"{job_context} step {index + 1}"
+                step = _node_mapping(step_node, step_context)
+                if "uses" in step:
+                    _assert_reviewed_action(step["uses"], step_context)
 
 
 def _assert_default_permissions_are_read_only() -> None:
     for path in _workflow_paths():
         workflow = path.read_text(encoding="utf-8")
         assert "pull_request_target" not in workflow
-        prefix = _workflow_prefix(workflow)
-        assert _mapping_block(
-            prefix,
-            "permissions",
-            header_indent=0,
-            entry_indent=2,
+        root, jobs = _workflow_nodes(workflow, path.name)
+        assert "permissions" in root, f"{path.name} needs top-level permissions"
+        assert _scalar_mapping(
+            root["permissions"], f"{path.name} permissions"
         ) == {"contents": "read"}, f"{path.name} needs read-only default permissions"
+
+        for job_name, job_node in jobs.items():
+            job_context = f"{path.name} job {job_name}"
+            job = _node_mapping(job_node, job_context)
+            expected = JOB_PERMISSION_EXCEPTIONS.get((path.name, job_name))
+            if expected is None:
+                assert "permissions" not in job, (
+                    f"{job_context} must inherit read-only permissions"
+                )
+                continue
+            assert "permissions" in job, f"{job_context} needs explicit permissions"
+            assert _scalar_mapping(
+                job["permissions"], f"{job_context} permissions"
+            ) == expected, f"{job_context} permissions must match the approved exception"
 
 
 def _assert_codeql_permissions_are_narrow(workflow: str) -> None:
-    analysis = _job_blocks(workflow)["analysis"]
-    assert _mapping_block(
-        analysis,
-        "permissions",
-        header_indent=4,
-        entry_indent=6,
-    ) == {"contents": "read", "security-events": "write"}
-    assert workflow.count("security-events: write") == 1
+    _, jobs = _workflow_nodes(workflow, "codeql.yml")
+    analysis = _node_mapping(jobs["analysis"], "codeql.yml job analysis")
+    assert _scalar_mapping(
+        analysis["permissions"], "codeql.yml job analysis permissions"
+    ) == JOB_PERMISSION_EXCEPTIONS[("codeql.yml", "analysis")]
 
 
 def _assert_release_permissions_are_narrow(workflow: str) -> None:
-    jobs = _job_blocks(workflow)
-    assert _mapping_block(
-        jobs["publish"],
-        "permissions",
-        header_indent=4,
-        entry_indent=6,
-    ) == {"id-token": "write"}
-    assert "id-token: write" not in jobs["build"]
-    assert workflow.count("id-token: write") == 1
+    _, jobs = _workflow_nodes(workflow, "release.yml")
+    build = _node_mapping(jobs["build"], "release.yml job build")
+    publish = _node_mapping(jobs["publish"], "release.yml job publish")
+    assert "permissions" not in build
+    assert _scalar_mapping(
+        publish["permissions"], "release.yml job publish permissions"
+    ) == JOB_PERMISSION_EXCEPTIONS[("release.yml", "publish")]
 
 
 def test_required_supply_chain_files_exist():
@@ -167,8 +215,102 @@ def test_yaml_workflow_cannot_bypass_action_pin_policy(tmp_path):
         _assert_reviewed_action_pins(tmp_path)
 
 
+def test_action_policy_rejects_quoted_uses_key_and_alias(tmp_path):
+    (tmp_path / "quoted.yml").write_text(
+        """name: quoted
+jobs:
+  unsafe:
+    steps:
+      - &unsafe
+        "uses": attacker/action@v1
+      - *unsafe
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match="mutable or malformed action"):
+        _assert_reviewed_action_pins(tmp_path)
+
+
+def test_action_policy_rejects_spaced_uses_key(tmp_path):
+    (tmp_path / "spaced.yml").write_text(
+        """name: spaced
+jobs:
+  unsafe:
+    steps:
+      - uses : attacker/action@v1
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match="mutable or malformed action"):
+        _assert_reviewed_action_pins(tmp_path)
+
+
+def test_action_policy_rejects_job_level_uses(tmp_path):
+    (tmp_path / "reusable.yml").write_text(
+        """name: reusable
+jobs:
+  unsafe:
+    "uses": attacker/repository/.github/workflows/unsafe.yml@v1
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match="mutable or malformed action"):
+        _assert_reviewed_action_pins(tmp_path)
+
+
+def test_action_policy_rejects_multiple_yaml_documents(tmp_path):
+    (tmp_path / "documents.yml").write_text(
+        """name: first
+jobs: {}
+---
+name: hidden
+jobs: {}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AssertionError, match="exactly one YAML document"):
+        _assert_reviewed_action_pins(tmp_path)
+
+
 def test_workflows_reject_privileged_pull_request_target_and_default_read_only():
     _assert_default_permissions_are_read_only()
+
+
+def test_tests_job_cannot_override_default_permissions(tmp_path, monkeypatch):
+    workflow = _workflow("tests.yml")
+    mutated = workflow.replace(
+        "  pytest:\n    runs-on:",
+        "  pytest:\n    permissions:\n      contents: write\n    runs-on:",
+    )
+    assert mutated != workflow
+    (tmp_path / "tests.yml").write_text(mutated, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "WORKFLOW_DIRECTORY", tmp_path)
+
+    with pytest.raises(AssertionError):
+        _assert_default_permissions_are_read_only()
+
+
+@pytest.mark.parametrize("job_name", ["pip-audit", "dependency-review"])
+def test_supply_chain_jobs_cannot_override_default_permissions(
+    tmp_path,
+    monkeypatch,
+    job_name,
+):
+    workflow = _workflow("supply-chain.yml")
+    mutated = workflow.replace(
+        f"  {job_name}:\n",
+        f"  {job_name}:\n    permissions:\n      contents: write\n",
+    )
+    assert mutated != workflow
+    (tmp_path / "supply-chain.yml").write_text(mutated, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "WORKFLOW_DIRECTORY", tmp_path)
+
+    with pytest.raises(AssertionError):
+        _assert_default_permissions_are_read_only()
 
 
 def test_every_job_has_an_explicit_timeout():
@@ -261,7 +403,8 @@ def test_supply_chain_runs_strict_audit_and_pr_only_dependency_review():
     _assert_trigger_has_main_branch(workflow, "pull_request")
     jobs = _job_blocks(workflow)
     assert "python -m pip install -e . -r requirements-ci.txt" in jobs["pip-audit"]
-    assert "python -m pip_audit --strict" in jobs["pip-audit"]
+    assert "python -m pip_audit --strict ." in jobs["pip-audit"]
+    assert "python -m pip_audit --strict -r requirements-ci.txt" in jobs["pip-audit"]
     review = jobs["dependency-review"]
     assert re.search(r"(?m)^    if:\s*github\.event_name == 'pull_request'\s*$", review)
     assert "actions/dependency-review-action@" in review
