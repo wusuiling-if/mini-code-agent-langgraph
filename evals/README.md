@@ -1,34 +1,59 @@
-# Offline behavior baseline
+# Offline Verified Patch benchmark
 
-This directory contains a minimal deterministic baseline for the production
-`MiniCodeAgent` loop.  It uses scripted local models and disposable copies of
-small fixtures, so it needs no API key and makes no network requests.
+This directory contains `verified-patch-v0.3.2`, an eleven-case deterministic
+benchmark for the production `MiniCodeAgent` loop and executor. It uses scripted
+local responses, standard-library-only fixtures, and disposable workspace copies.
+It requires no provider credentials and makes no network requests.
 
-The three cases cover:
+The cases are:
 
-- `single-file-fix`: reproduce, edit one file, verify, and submit;
-- `explain-only`: inspect and explain without changing the workspace;
-- `failed-fix-recovery`: reject a failed correction, recover, verify, and submit.
+- `single-file-fix`: repair one file, verify, inspect the diff, and submit;
+- `multi-file-fix`: make exactly two required implementation edits and submit;
+- `explain-only`: verify and explain existing behavior without changing files;
+- `failed-fix-recovery`: observe a failed edit, correct it, and verify again;
+- `premature-submission`: refuse an unverified submit, then verify and recover;
+- `stale-verification`: invalidate evidence after a later edit, then retest;
+- `failed-test-refusal`: refuse submission after an authoritative test failure;
+- `zero-test-refusal`: reject zero discovered tests and refuse submission;
+- `shell-disabled`: refuse arbitrary shell, then verify with the structured tool;
+- `checkpoint-resume`: resume at a safe boundary and require a fresh passing test;
+- `authenticated-undo`: submit a verified edit and authenticate exact restoration.
+
+The two terminal refusal cases are passing policy outcomes when the expected
+failure is observed and no submission is accepted. The Undo case has outcome
+`reverted`; other successful completion cases have outcome `submitted`.
 
 Run the complete suite from the repository root:
 
 ```bash
-.venv/bin/python evals/run_evals.py
+.venv/bin/python -m evals.run_evals --json
 ```
 
-Run one case or save the JSON report:
+Run one case, select several cases, or save the sanitized report:
 
 ```bash
-.venv/bin/python evals/run_evals.py --case failed-fix-recovery
-.venv/bin/python evals/run_evals.py --output /tmp/mca-eval-report.json
+.venv/bin/python -m evals.run_evals --case failed-test-refusal --json
+.venv/bin/python -m evals.run_evals --case single-file-fix --case multi-file-fix --json
+.venv/bin/python -m evals.run_evals --output /tmp/mca-eval-report.json --json
 ```
 
-Each case reports `success`, `verified`, `steps`, `tool_calls`, `duration_ms`,
-and `unrelated_changes`, plus verification/recovery diagnostics.  The process
-returns nonzero when any selected case fails.  Durations naturally vary by
-machine; the fixtures, tool plans, expected changes, and pass/fail result are
-otherwise deterministic.
+Every selection retains report schema `2` and suite name
+`verified-patch-v0.3.2`. Stable evidence includes case names, scripted plans,
+expected outcomes, policy refusal codes, exact expected and unrelated changes,
+structured `returncode`/`tests_run` records, steps, tool calls, and pass/fail
+results. `duration_ms`, Python major/minor, and the platform system name are
+informational and may vary by machine. The process exits nonzero if any selected
+case fails its full contract.
 
-This is a runtime-policy regression baseline, not a model-quality benchmark.
-A later online eval can reuse the cases while replacing `ScriptedEvalModel`
-with a real provider and adding token, cost, and semantic-quality metrics.
+Reports contain normalized evidence only. They do not contain raw agent state,
+workspace contents, secret values, Undo records, authentication keys, or
+persistence and internal state paths. Lifecycle files used by resume and Undo
+exist only inside the scenario's disposable temporary directory.
+
+## Scope boundary
+
+This benchmark is offline runtime-policy evidence. Scripted plans measure
+production-loop verification, refusal, recovery, resume, Undo, and workspace
+discipline. They do **not** measure model quality, autonomous repair ability,
+SWE-bench performance, provider behavior, or general software-engineering task
+success.
