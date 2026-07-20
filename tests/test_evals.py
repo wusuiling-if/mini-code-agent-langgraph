@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 
 from mini_code_agent.contracts import ToolResult
+from mini_code_agent.context import audit_tool_args
 from mini_code_agent.executor import BashExecutor
 
+import evals.run_evals as evals
 from evals.run_evals import CASES, main, run_case, run_suite
 
 
@@ -103,6 +106,85 @@ def test_tool_argument_contract_rejects_a_wrong_read_target() -> None:
     assert all("args" not in event for event in result["tools"])
 
 
+def test_independent_argument_oracle_rejects_canonical_plan_drift() -> None:
+    case = next(case for case in CASES if case.name == "multi-file-fix")
+    responses = list(case.responses)
+    responses[2] = replace(
+        responses[2],
+        calls=(("read_file", {"path": "test_invoice.py"}),),
+    )
+    drifted = evals._bind_expected_argument_signatures(
+        replace(case, responses=tuple(responses))
+    )
+
+    result = run_case(drifted)
+
+    assert result["passed"] is False
+    assert result["tool_contract_matched"] is False
+    assert "ToolEventContractMismatch" in result["validation_errors"]
+    rendered = json.dumps(result)
+    assert "test_invoice.py" not in rendered
+    assert "argument_signature" not in rendered
+    assert all("args" not in event for event in result["tools"])
+
+
+def test_private_argument_oracle_covers_all_eleven_case_specs() -> None:
+    expected_case_names = {
+        "single-file-fix",
+        "multi-file-fix",
+        "explain-only",
+        "failed-fix-recovery",
+        "premature-submission",
+        "stale-verification",
+        "failed-test-refusal",
+        "zero-test-refusal",
+        "shell-disabled",
+        "checkpoint-resume",
+        "authenticated-undo",
+    }
+    oracle = getattr(evals, "_EXPECTED_TOOL_ARGUMENT_ORACLE", {})
+
+    assert set(oracle) == expected_case_names
+    assert sum(len(calls) for calls in oracle.values()) == 50
+    for case in CASES:
+        oracle_calls = oracle[case.name]
+        assert tuple(tool for tool, _arguments in oracle_calls) == tuple(
+            event.tool for event in case.expected_tools
+        )
+        assert all(event.argument_signature for event in case.expected_tools)
+        actual_signatures = tuple(
+            event.argument_signature for event in case.expected_tools
+        )
+        expected_signatures = tuple(
+            evals._expected_argument_signature(tool, arguments)
+            for tool, arguments in oracle_calls
+        )
+        assert actual_signatures == expected_signatures
+
+    safe_matrix = [
+        {
+            "name": name,
+            "calls": [
+                {
+                    "tool": tool,
+                    "arguments": audit_tool_args(tool, arguments),
+                }
+                for tool, arguments in oracle[name]
+            ],
+        }
+        for name in sorted(oracle)
+    ]
+    payload = json.dumps(
+        safe_matrix,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    assert hashlib.sha256(payload.encode("utf-8")).hexdigest() == (
+        "76ff6e4b7dcd22e14cdbcf824ffc6d23abe91f15e2f86d3136ef7f4c5f731f40"
+    )
+
+
 def test_unavailable_git_diff_evidence_cannot_pass(monkeypatch) -> None:
     def unavailable_git_diff(self: BashExecutor, path: str = "") -> ToolResult:
         return ToolResult(
@@ -139,8 +221,21 @@ def test_verified_patch_suite_covers_all_eleven_policy_cases() -> None:
     assert set(report["harness"]["python"]) == {"major", "minor"}
     assert isinstance(report["harness"]["platform"], str)
 
-    # The public report must stay machine-readable without custom encoders.
-    json.dumps(report)
+    # The public report must stay machine-readable without private oracle material.
+    rendered = json.dumps(report)
+    for forbidden in (
+        '"args"',
+        "argument_signature",
+        "sha256",
+        "return a - b",
+        "return total * (1 - rate)",
+        "printf unsafe",
+        "Fixed add() and verified the test suite.",
+        "test_invoice.py",
+        "mca-eval-",
+        "/Users/",
+    ):
+        assert forbidden not in rendered
 
 
 def test_refusal_cases_report_expected_runtime_policy_evidence() -> None:

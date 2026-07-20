@@ -639,16 +639,166 @@ CASES = (
 )
 
 
+_EXPECTED_TOOL_ARGUMENT_ORACLE: dict[
+    str, tuple[tuple[str, dict[str, Any]], ...]
+] = {
+    "single-file-fix": (
+        ("list_files", {}),
+        ("run_tests", {}),
+        ("read_file", {"path": "calculator.py"}),
+        (
+            "apply_patch",
+            {
+                "path": "calculator.py",
+                "old": "return a - b",
+                "new": "return a + b",
+            },
+        ),
+        ("run_tests", {}),
+        ("git_diff", {}),
+        ("submit", {"summary": "Fixed add() and verified the test suite."}),
+    ),
+    "multi-file-fix": (
+        ("run_tests", {}),
+        ("read_file", {"path": "pricing.py"}),
+        ("read_file", {"path": "invoice.py"}),
+        (
+            "apply_patch",
+            {
+                "path": "pricing.py",
+                "old": "return total",
+                "new": "return total * (1 - rate)",
+            },
+        ),
+        (
+            "apply_patch",
+            {
+                "path": "invoice.py",
+                "old": "return apply_discount(subtotal, rate)",
+                "new": "return apply_discount(subtotal, rate) + shipping",
+            },
+        ),
+        ("run_tests", {}),
+        (
+            "submit",
+            {"summary": "Fixed discounting and shipping in exactly two files."},
+        ),
+    ),
+    "explain-only": (
+        ("list_files", {}),
+        ("read_file", {"path": "pricing.py"}),
+        ("run_tests", {}),
+        (
+            "submit",
+            {
+                "summary": (
+                    "apply_discount multiplies the total by one minus the rate; "
+                    "no code change was required."
+                )
+            },
+        ),
+    ),
+    "failed-fix-recovery": (
+        ("run_tests", {}),
+        (
+            "apply_patch",
+            {
+                "path": "transform.py",
+                "old": "return value * 2",
+                "new": "return value + 3",
+            },
+        ),
+        ("run_tests", {}),
+        (
+            "apply_patch",
+            {
+                "path": "transform.py",
+                "old": "return value + 3",
+                "new": "return value * 3",
+            },
+        ),
+        ("run_tests", {}),
+        (
+            "submit",
+            {"summary": "Recovered from a failed attempt and verified triple()."},
+        ),
+    ),
+    "premature-submission": (
+        (
+            "apply_patch",
+            {"path": "value.py", "old": "VALUE = 1", "new": "VALUE = 2"},
+        ),
+        ("submit", {"summary": "too early"}),
+        ("run_tests", {}),
+        ("submit", {"summary": "Verified VALUE = 2."}),
+    ),
+    "stale-verification": (
+        (
+            "apply_patch",
+            {"path": "value.py", "old": "VALUE = 1", "new": "VALUE = 2"},
+        ),
+        ("run_tests", {}),
+        (
+            "apply_patch",
+            {"path": "value.py", "old": "VALUE = 2", "new": "VALUE = 3"},
+        ),
+        ("submit", {"summary": "stale"}),
+        (
+            "apply_patch",
+            {"path": "value.py", "old": "VALUE = 3", "new": "VALUE = 2"},
+        ),
+        ("run_tests", {}),
+        ("submit", {"summary": "Freshly verified VALUE = 2."}),
+    ),
+    "failed-test-refusal": (
+        (
+            "apply_patch",
+            {"path": "value.py", "old": "VALUE = 1", "new": "VALUE = 3"},
+        ),
+        ("run_tests", {}),
+        ("submit", {"summary": "must be refused"}),
+    ),
+    "zero-test-refusal": (
+        (
+            "apply_patch",
+            {"path": "module.py", "old": "VALUE = 1", "new": "VALUE = 2"},
+        ),
+        ("run_tests", {}),
+        ("submit", {"summary": "must be refused"}),
+    ),
+    "shell-disabled": (
+        ("bash", {"command": "printf unsafe"}),
+        ("run_tests", {}),
+        ("submit", {"summary": "Note stayed safe."}),
+    ),
+    "checkpoint-resume": (
+        (
+            "apply_patch",
+            {"path": "value.py", "old": "VALUE = 1", "new": "VALUE = 2"},
+        ),
+        ("run_tests", {}),
+        ("submit", {"summary": "Resumed, retested, and verified."}),
+    ),
+    "authenticated-undo": (
+        (
+            "apply_patch",
+            {"path": "note.py", "old": 'TEXT = "before"', "new": 'TEXT = "after"'},
+        ),
+        ("run_tests", {}),
+        ("submit", {"summary": "Changed note and verified it."}),
+    ),
+}
+
+
 def _bind_expected_argument_signatures(case: EvalCase) -> EvalCase:
-    planned_calls = [
-        (tool, arguments)
-        for response in case.responses
-        for tool, arguments in response.calls
-    ]
-    if len(planned_calls) != len(case.expected_tools):
+    try:
+        oracle_calls = _EXPECTED_TOOL_ARGUMENT_ORACLE[case.name]
+    except KeyError as exc:
+        raise ValueError(f"argument oracle missing for {case.name}") from exc
+    if len(oracle_calls) != len(case.expected_tools):
         raise ValueError(f"tool contract length mismatch for {case.name}")
     expected_tools: list[ExpectedToolEvent] = []
-    for expected, (tool, arguments) in zip(case.expected_tools, planned_calls):
+    for expected, (tool, arguments) in zip(case.expected_tools, oracle_calls):
         if expected.tool != tool:
             raise ValueError(f"tool contract order mismatch for {case.name}")
         expected_tools.append(

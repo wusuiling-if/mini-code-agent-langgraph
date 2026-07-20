@@ -41,11 +41,13 @@ Every selection retains report schema `2` and suite name
 `verified-patch-v0.3.2`. Stable evidence includes case names, scripted plans,
 expected outcomes, policy refusal codes, exact expected and unrelated changes,
 structured `returncode`/`tests_run` records, ordered tool-result and private
-hashed-argument contracts, steps, tool calls, and pass/fail results. The
-single-file scenario creates a committed disposable Git baseline and requires
-recognized tracked-diff markers. `duration_ms`, Python major/minor, and the
-platform system name are informational and may vary by machine. The process
-exits nonzero if any selected case fails its full contract.
+hashed-argument contracts, steps, tool calls, and pass/fail results. Expected
+argument signatures come from an explicit private specification oracle that is
+independent of the scripted model responses. The single-file scenario creates
+a committed disposable Git baseline and requires recognized tracked-diff
+markers. `duration_ms`, Python major/minor, and the platform system name are
+informational and may vary by machine. The process exits nonzero if any selected
+case fails its full contract.
 
 Reports contain normalized evidence only. They do not contain raw agent state,
 workspace contents, secret values, Undo records, authentication keys, or
