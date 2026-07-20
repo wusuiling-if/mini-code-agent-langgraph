@@ -1,10 +1,20 @@
 # mini-code-agent-langgraph
 
+[![tests](https://github.com/wusuiling-if/mini-code-agent-langgraph/actions/workflows/tests.yml/badge.svg)](https://github.com/wusuiling-if/mini-code-agent-langgraph/actions/workflows/tests.yml)
+[![Python 3.10–3.13](https://img.shields.io/badge/Python-3.10%E2%80%933.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/LICENSE)
+
 > A compact, security-first LangGraph coding agent with verified patches, crash recovery, and HMAC-authenticated undo.
 
 [中文详细指南](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/README.zh-CN.md) · [Security policy](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/SECURITY.md) · [Contributing](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CONTRIBUTING.md) · [Changelog](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CHANGELOG.md)
 
 `mini-code-agent-langgraph` is a single-process, line-oriented CLI and REPL for studying, auditing, and extending a constrained coding-agent loop. It is not a full-screen TUI or web application.
+
+![`mca demo` fixes a calculator bug, verifies the tests, and submits the patch](https://raw.githubusercontent.com/wusuiling-if/mini-code-agent-langgraph/main/docs/assets/demo.gif)
+
+- **Verification-bound submission:** the selected test command must pass against the current workspace fingerprint before the agent can submit.
+- **Inspectable recovery:** redacted trajectories persist each run and can resume safely after an interruption.
+- **Conflict-aware Undo:** a private HMAC-authenticated journal rejects post-edit conflicts by default.
 
 ## Try it without an API key
 
