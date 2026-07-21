@@ -16,14 +16,10 @@
 - **Inspectable recovery:** redacted trajectories persist each run and can resume safely after an interruption.
 - **Conflict-aware Undo:** a private HMAC-authenticated journal rejects post-edit conflicts by default.
 
-## Try it without an API key
+## Install and try it without an API key
 
 ```bash
-git clone https://github.com/wusuiling-if/mini-code-agent-langgraph.git
-cd mini-code-agent-langgraph
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
+python -m pip install mini-code-agent-langgraph
 mca demo
 ```
 
@@ -33,7 +29,7 @@ mca demo
 mca doctor --cwd /path/to/repo --sandbox auto --provider auto
 ```
 
-`doctor` performs static prerequisite checks; `run` and `chat` perform the authoritative sandbox usability probe at startup. Doctor checks whether a provider key is present in the current process environment without printing its value, and inspects private env-file metadata without opening the file.
+`doctor` performs static prerequisite checks. `run` and coding-enabled `chat` sessions perform the authoritative sandbox usability probe at startup; a coding-enabled chat is one started with `--test-command`. An `/ask`-only chat started without `--test-command` skips the sandbox probe because it cannot run tests, shell commands, or coding tools. Doctor checks whether a provider key is present in the current process environment without printing its value, and inspects private env-file metadata without opening the file.
 
 ## Run and chat
 
@@ -42,10 +38,10 @@ Create a private environment-file template with `mca init`, populate it with a p
 ```bash
 mca init
 mca run "Fix the failing tests" --cwd /path/to/repo --model deepseek --provider deepseek --test-command "python3 -m pytest -q"
-mca chat --cwd /path/to/repo --model deepseek --provider deepseek
+mca chat --cwd /path/to/repo --model deepseek --provider deepseek --test-command "python3 -m pytest -q"
 ```
 
-`mca run` is a one-shot agent run. `mca chat` is a persistent REPL that starts in read-only `/ask` mode; enter `/code` to explicitly allow coding tools. `--yes` skips confirmations but never grants `/code` mode by itself. `--model mock` is available for local `run` dry runs and tests, not chat.
+`mca run` is a one-shot coding run and requires both an explicit `--model` and an explicit authoritative `--test-command`; it rejects `--model mock`, so use `mca demo` for the deterministic no-key flow. `mca chat` is a persistent REPL that starts in read-only `/ask` mode. A chat started without `--test-command` remains `/ask`-only and blocks `/code`; supply the flag, then enter `/code`, to explicitly allow coding tools. `--yes` skips confirmations but never grants `/code` mode by itself.
 
 Runs and chats save a trajectory. Inspect it or preview a conflict-aware undo before changing files:
 
@@ -58,12 +54,24 @@ mca undo /path/to/run.traj.json --dry-run
 
 - New runs and chats reject dirty Git worktrees by default; arbitrary shell access is disabled by default.
 - Structured file operations are confined to the resolved workspace, and `/ask` has a runtime read-only allowlist.
-- A user-selected authoritative test must pass against the current workspace fingerprint before submission. Resume invalidates earlier verification.
+- A user-selected authoritative test must pass against the current workspace fingerprint before submission. A recognized zero-test result is rejected by default, and resume invalidates earlier verification.
 - Undo uses a private, HMAC-authenticated journal and rejects post-edit conflicts unless explicitly forced.
-- `--sandbox auto` fails closed if no usable backend is found. `--sandbox none`, `--allow-shell`, `--allow-dirty`, `--yes`, and force/legacy Undo options deliberately weaken protections.
+- `--allow-zero-tests` explicitly weakens verification by allowing a recognized zero-test result to satisfy the gate. `--sandbox none`, `--allow-shell`, `--allow-dirty`, `--yes`, and force/legacy Undo options also deliberately weaken protections; `--sandbox auto` fails closed if no usable backend is found.
 - Native Windows supports informational CLI and configuration paths only. Run the full agent, structured tools, and `mca demo` from macOS, Linux, or WSL2. macOS uses `sandbox-exec`; Linux uses `bwrap` or Docker when available.
 
 These controls are defense in depth, not a guarantee that an untrusted repository, command, dependency, image, host, or provider is safe. Do not run it in a workspace containing production credentials. Read the complete [security policy](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/SECURITY.md) before use.
+
+## Offline verified-patch benchmark
+
+From a source checkout, reproduce the deterministic v0.3.2 baseline with:
+
+```bash
+.venv/bin/python -m evals.run_evals --json
+```
+
+The eleven cases cover `single-file-fix`, `multi-file-fix`, `explain-only`, `failed-fix-recovery`, `premature-submission`, `stale-verification`, `failed-test-refusal`, `zero-test-refusal`, `shell-disabled`, `checkpoint-resume`, and `authenticated-undo`. The v0.3.2 baseline is **11/11 passing**: nine verified submissions, two expected policy refusals, zero unexpected submissions, and zero unrelated changes.
+
+This is offline runtime-policy conformance evidence produced with scripted local decisions. It does **not** measure model quality, autonomous repair ability, provider behavior, real-world task success, or SWE-bench performance.
 
 ## Project structure
 
@@ -79,7 +87,9 @@ tests/                               Deterministic test suite
 evals/                               Offline evaluation baseline
 ```
 
-## Validate a checkout
+## Develop and validate a checkout
+
+Cloning the repository and using an editable install are contributor workflows; follow [CONTRIBUTING.md](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CONTRIBUTING.md) for the source setup. In that activated development environment, run:
 
 ```bash
 pytest -q
@@ -89,4 +99,4 @@ mca doctor --sandbox none
 mca demo
 ```
 
-`mca doctor --sandbox none` is a read-only configuration smoke test and intentionally reports an isolation warning. Skip `mca demo` on native Windows and run it from WSL2 instead. For contribution and release expectations, see [CONTRIBUTING.md](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CONTRIBUTING.md) and [CHANGELOG.md](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CHANGELOG.md).
+`mca doctor --sandbox none` is a read-only configuration smoke test and intentionally reports an isolation warning. Skip `mca demo` on native Windows and run it from WSL2 instead. For release expectations, see [CHANGELOG.md](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CHANGELOG.md).

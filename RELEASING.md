@@ -44,22 +44,28 @@ python -m build --sdist --wheel
 python -m twine check dist/*
 ```
 
-For version `0.3.1`, verify the exact tag/package relationship locally:
+Derive the release version from `pyproject.toml`, then verify the exact
+source/package/tag relationship locally:
 
 ```bash
+VERSION="$(awk -F '"' '/^version = / { print $2; exit }' pyproject.toml)"
+test -n "$VERSION"
+export VERSION
 python - <<'PY'
+import os
+import re
 import sys
-import tomllib
 from pathlib import Path
 
 root = Path.cwd().resolve()
 sys.path.insert(0, str(root / "src"))
 from mini_code_agent import __version__ as source_version
 
-version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
-assert source_version == version
-assert version == "0.3.1"
-assert f"v{version}" == "v0.3.1"
+version = os.environ["VERSION"]
+assert re.fullmatch(r"\d+\.\d+\.\d+", version), version
+assert source_version == version, (source_version, version)
+assert f"v{version}"[1:] == version
+print(f"release version: {version}; tag: v{version}")
 PY
 ```
 
@@ -76,8 +82,10 @@ push one annotated tag:
 git switch main
 git pull --ff-only
 git status --short
-git tag -a v0.3.1 -m "mini-code-agent-langgraph 0.3.1"
-git push origin v0.3.1
+VERSION="$(awk -F '"' '/^version = / { print $2; exit }' pyproject.toml)"
+test -n "$VERSION"
+git tag -a "v${VERSION}" -m "mini-code-agent-langgraph ${VERSION}"
+git push origin "v${VERSION}"
 ```
 
 Watch the `release.yml` workflow. Its build job validates one source archive and
@@ -87,8 +95,10 @@ Trusted Publishing. Confirm the release on PyPI before continuing.
 After the workflow succeeds, create the matching GitHub Release:
 
 ```bash
-gh release create v0.3.1 --verify-tag --generate-notes \
-  --title "mini-code-agent-langgraph 0.3.1"
+VERSION="$(awk -F '"' '/^version = / { print $2; exit }' pyproject.toml)"
+test -n "$VERSION"
+gh release create "v${VERSION}" --verify-tag --generate-notes \
+  --title "mini-code-agent-langgraph ${VERSION}"
 ```
 
 ## Fix-forward rule

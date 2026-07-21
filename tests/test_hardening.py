@@ -243,6 +243,8 @@ def test_chat_cli_prints_structured_turn_and_returns_to_ask_after_submit(
             str(tmp_path),
             "--model",
             "deepseek",
+            "--test-command",
+            "pytest -q",
             "--sandbox",
             "none",
             "--allow-dirty",
@@ -255,6 +257,84 @@ def test_chat_cli_prints_structured_turn_and_returns_to_ask_after_submit(
     assert "turn: status=submitted completed=true verified=true steps=3 error=none" in output
     assert "mode=/ask (coding turn submitted; use /code for another coding task)" in output
     assert created["coding_mode"] is True
+    assert created["access"].mode == "ask"
+    assert created["closed"] is True
+
+
+def test_chat_code_command_without_test_command_stays_in_ask_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    created: dict[str, object] = {}
+
+    class FakeSession:
+        def __init__(self, model, executor, **kwargs):
+            created["access"] = executor
+
+        def respond_turn(self, user_text: str, *, coding_mode: bool):
+            calls = created.setdefault("turns", [])
+            calls.append((user_text, coding_mode))
+            return TurnResult(
+                text="ordinary answer",
+                status="answered",
+                completed=True,
+                verified=False,
+                steps=1,
+            )
+
+        def close(self):
+            created["closed"] = True
+
+    class TtyInput:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    inputs = iter(["What does this project do?", "/code edit", "/exit"])
+
+    def fail_sandbox_probe(_executor):
+        raise RuntimeError("no sandbox backend is available")
+
+    monkeypatch.setattr(cli_module.sys, "stdin", TtyInput())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
+    monkeypatch.setattr(cli_module, "_load_runtime_env", lambda _path: None)
+    monkeypatch.setattr(cli_module, "_model_from_args", lambda _args: object())
+    monkeypatch.setattr(
+        cli_module,
+        "_require_working_sandbox",
+        fail_sandbox_probe,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_resume_output_path",
+        lambda _resume, _output, _kind: tmp_path / "session.chat.json",
+    )
+    monkeypatch.setattr(cli_module, "ConversationalCodeAgent", FakeSession)
+
+    args = build_parser().parse_args(
+        [
+            "chat",
+            "--cwd",
+            str(tmp_path),
+            "--model",
+            "deepseek",
+            "--allow-dirty",
+        ]
+    )
+
+    assert cli_module.chat_command(args) == 0
+
+    output = capsys.readouterr().out
+    assert "ordinary answer" in output
+    assert "restart with --test-command" in output
+    assert created["turns"] == [
+        (
+            "[Read-only /ask mode is enforced: explain or inspect only; do not request "
+            "write, shell, or test tools.]\n\nWhat does this project do?",
+            False,
+        )
+    ]
     assert created["access"].mode == "ask"
     assert created["closed"] is True
 
@@ -319,6 +399,21 @@ def test_ask_mode_is_a_read_only_allowlist(tmp_path: Path):
         result = access.execute_tool(name, {})
         assert result.blocked
         assert result.exception_info == "ReadOnlyChatMode"
+
+
+def test_chat_controller_blocks_coding_when_test_command_is_unavailable(
+    tmp_path: Path,
+):
+    access = ChatAccessController(
+        BashExecutor(tmp_path, approval_mode="yolo", sandbox_mode="none"),
+        coding_enabled=False,
+    )
+    access.mode = "code"
+
+    result = access.execute_tool("write_file", {"path": "value.txt", "content": "x"})
+
+    assert result.blocked
+    assert result.exception_info == "TestCommandRequired"
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:

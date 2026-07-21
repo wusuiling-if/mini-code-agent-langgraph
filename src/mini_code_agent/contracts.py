@@ -39,6 +39,7 @@ class ToolResult:
     submission: str = ""
     approved: bool = True
     blocked: bool = False
+    tests_run: int | None = None
 
     def to_observation(self) -> dict:
         data = {
@@ -56,6 +57,8 @@ class ToolResult:
             data["approved"] = False
         if self.blocked:
             data["blocked"] = True
+        if self.tests_run is not None:
+            data["tests_run"] = self.tests_run
         return data
 
 

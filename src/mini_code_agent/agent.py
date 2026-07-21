@@ -302,6 +302,8 @@ class MiniCodeAgent:
                 "approved": result.approved,
                 "blocked": result.blocked,
             }
+            if result.tests_run is not None:
+                event["tests_run"] = result.tests_run
             events.append(event)
             self._event_log.append(event)
             self._print(f"[returncode {result.returncode}]\n{truncate_text(result.output, 2000)}")

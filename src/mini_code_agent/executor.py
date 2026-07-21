@@ -24,7 +24,10 @@ from mini_code_agent.security import SafeWorkspace, SecretRedactor
 from mini_code_agent.utils import DEFAULT_OUTPUT_LIMIT, truncate_text
 from mini_code_agent.workspace import WorkspaceFingerprinter
 
-DEFAULT_TEST_COMMAND = "python3 -m unittest discover -v"
+UNITTEST_COUNT = re.compile(r"(?m)^Ran\s+(\d+)\s+tests?\s+in\s+")
+PYTEST_ZERO = re.compile(
+    r"(?im)(?:^collected 0 items\s*$|^no tests ran(?: in .*)?\s*$)"
+)
 MAX_COMMAND_OUTPUT_BYTES = 2 * 1024 * 1024
 MAX_STRUCTURED_EDIT_CHARS = 8 * 1024 * 1024
 PROCESS_TERMINATION_GRACE_SECONDS = 0.5
@@ -126,7 +129,8 @@ class BashExecutor:
         timeout_seconds: int = 30,
         approval_mode: Literal["confirm", "yolo"] = "confirm",
         allow_shell: bool = False,
-        default_test_command: str = DEFAULT_TEST_COMMAND,
+        default_test_command: str | None = None,
+        allow_zero_tests: bool = False,
         sandbox_mode: Literal["auto", "sandbox-exec", "bwrap", "docker", "none"] = "auto",
         docker_image: str = "python:3.11-slim",
         env: dict[str, str] | None = None,
@@ -137,9 +141,12 @@ class BashExecutor:
         self.timeout_seconds = timeout_seconds
         self.approval_mode = approval_mode
         self.allow_shell = allow_shell
-        if not isinstance(default_test_command, str) or not default_test_command.strip():
-            raise ValueError("default_test_command must not be blank")
-        self.default_test_command = default_test_command.strip()
+        if default_test_command is not None:
+            if not isinstance(default_test_command, str) or not default_test_command.strip():
+                raise ValueError("default_test_command must not be blank")
+            default_test_command = default_test_command.strip()
+        self.default_test_command = default_test_command
+        self.allow_zero_tests = allow_zero_tests
         self.sandbox_mode = sandbox_mode
         if not isinstance(docker_image, str) or not docker_image.strip():
             raise ValueError("docker_image must not be blank")
@@ -204,7 +211,7 @@ class BashExecutor:
                 case "git_diff":
                     return self.git_diff(str(args.get("path", "")))
                 case "run_tests":
-                    return self.run_tests(str(args.get("command") or self.default_test_command))
+                    return self.run_tests(args.get("command"))
                 case "submit":
                     return self.submit(str(args.get("summary", "")))
         except Exception as exc:
@@ -611,6 +618,19 @@ class BashExecutor:
         )
 
     def run_tests(self, command: str | None = None) -> ToolResult:
+        if self.default_test_command is None:
+            return ToolResult(
+                tool="run_tests",
+                command="",
+                output=(
+                    "No authoritative test command is configured. Restart with "
+                    "--test-command '<command>'."
+                ),
+                returncode=-1,
+                duration_ms=0,
+                exception_info="TestCommandRequired",
+                blocked=True,
+            )
         command = self.default_test_command if command is None else command
         if not isinstance(command, str) or not command.strip():
             return ToolResult(
@@ -663,7 +683,19 @@ class BashExecutor:
                 exception_info="User rejected test command.",
                 approved=False,
             )
-        return self._run_command("run_tests", command, args={"command": command})
+        result = self._run_command("run_tests", command, args={"command": command})
+        unittest_match = UNITTEST_COUNT.search(result.output)
+        if unittest_match:
+            result.tests_run = int(unittest_match.group(1))
+        elif PYTEST_ZERO.search(result.output):
+            result.tests_run = 0
+        if result.tests_run == 0 and result.returncode in {0, 5}:
+            if self.allow_zero_tests:
+                result.returncode = 0
+            else:
+                result.returncode = 1
+                result.exception_info = "NoTestsCollected"
+        return result
 
     def submit(self, summary: str = "") -> ToolResult:
         submission = summary.strip()

@@ -1,46 +1,299 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import replace
 
-from evals.run_evals import main, run_suite
+from mini_code_agent.contracts import ToolResult
+from mini_code_agent.context import audit_tool_args
+from mini_code_agent.executor import BashExecutor
+
+import evals.run_evals as evals
+from evals.run_evals import CASES, main, run_case, run_suite
 
 
-def test_offline_behavior_baseline_covers_three_core_categories() -> None:
+def test_case_matrix_has_the_exact_required_tool_sequences() -> None:
+    expected = {
+        "single-file-fix": [
+            "list_files",
+            "run_tests",
+            "read_file",
+            "apply_patch",
+            "run_tests",
+            "git_diff",
+            "submit",
+        ],
+        "multi-file-fix": [
+            "run_tests",
+            "read_file",
+            "read_file",
+            "apply_patch",
+            "apply_patch",
+            "run_tests",
+            "submit",
+        ],
+        "explain-only": ["list_files", "read_file", "run_tests", "submit"],
+        "failed-fix-recovery": [
+            "run_tests",
+            "apply_patch",
+            "run_tests",
+            "apply_patch",
+            "run_tests",
+            "submit",
+        ],
+        "premature-submission": ["apply_patch", "submit", "run_tests", "submit"],
+        "stale-verification": [
+            "apply_patch",
+            "run_tests",
+            "apply_patch",
+            "submit",
+            "apply_patch",
+            "run_tests",
+            "submit",
+        ],
+        "failed-test-refusal": ["apply_patch", "run_tests", "submit"],
+        "zero-test-refusal": ["apply_patch", "run_tests", "submit"],
+        "shell-disabled": ["bash", "run_tests", "submit"],
+        "checkpoint-resume": ["apply_patch", "run_tests", "submit"],
+        "authenticated-undo": ["apply_patch", "run_tests", "submit"],
+    }
+    actual = {
+        case.name: [
+            name
+            for response in case.responses
+            for name, _arguments in response.calls
+        ]
+        for case in CASES
+    }
+
+    assert actual == expected
+
+
+def test_non_test_tool_failure_breaks_the_exact_event_contract(monkeypatch) -> None:
+    def fail_list_files(
+        self: BashExecutor, path: str = ".", *, max_files: int = 200
+    ) -> ToolResult:
+        return ToolResult(
+            tool="list_files",
+            output="",
+            returncode=1,
+            duration_ms=0,
+            exception_info="InjectedFailure",
+        )
+
+    monkeypatch.setattr(BashExecutor, "list_files", fail_list_files)
+
+    case = run_suite({"single-file-fix"})["cases"][0]
+    assert case["passed"] is False
+    assert case["tool_contract_matched"] is False
+    assert "ToolEventContractMismatch" in case["validation_errors"]
+
+
+def test_tool_argument_contract_rejects_a_wrong_read_target() -> None:
+    case = next(case for case in CASES if case.name == "single-file-fix")
+    responses = list(case.responses)
+    responses[2] = replace(
+        responses[2],
+        calls=(("read_file", {"path": "test_calculator.py"}),),
+    )
+
+    result = run_case(replace(case, responses=tuple(responses)))
+
+    assert result["passed"] is False
+    assert result["tool_contract_matched"] is False
+    assert "ToolEventContractMismatch" in result["validation_errors"]
+    assert "test_calculator.py" not in json.dumps(result)
+    assert all("args" not in event for event in result["tools"])
+
+
+def test_independent_argument_oracle_rejects_canonical_plan_drift() -> None:
+    case = next(case for case in CASES if case.name == "multi-file-fix")
+    responses = list(case.responses)
+    responses[2] = replace(
+        responses[2],
+        calls=(("read_file", {"path": "test_invoice.py"}),),
+    )
+    drifted = evals._bind_expected_argument_signatures(
+        replace(case, responses=tuple(responses))
+    )
+
+    result = run_case(drifted)
+
+    assert result["passed"] is False
+    assert result["tool_contract_matched"] is False
+    assert "ToolEventContractMismatch" in result["validation_errors"]
+    rendered = json.dumps(result)
+    assert "test_invoice.py" not in rendered
+    assert "argument_signature" not in rendered
+    assert all("args" not in event for event in result["tools"])
+
+
+def test_private_argument_oracle_covers_all_eleven_case_specs() -> None:
+    expected_case_names = {
+        "single-file-fix",
+        "multi-file-fix",
+        "explain-only",
+        "failed-fix-recovery",
+        "premature-submission",
+        "stale-verification",
+        "failed-test-refusal",
+        "zero-test-refusal",
+        "shell-disabled",
+        "checkpoint-resume",
+        "authenticated-undo",
+    }
+    oracle = getattr(evals, "_EXPECTED_TOOL_ARGUMENT_ORACLE", {})
+
+    assert set(oracle) == expected_case_names
+    assert sum(len(calls) for calls in oracle.values()) == 50
+    for case in CASES:
+        oracle_calls = oracle[case.name]
+        assert tuple(tool for tool, _arguments in oracle_calls) == tuple(
+            event.tool for event in case.expected_tools
+        )
+        assert all(event.argument_signature for event in case.expected_tools)
+        actual_signatures = tuple(
+            event.argument_signature for event in case.expected_tools
+        )
+        expected_signatures = tuple(
+            evals._expected_argument_signature(tool, arguments)
+            for tool, arguments in oracle_calls
+        )
+        assert actual_signatures == expected_signatures
+
+    safe_matrix = [
+        {
+            "name": name,
+            "calls": [
+                {
+                    "tool": tool,
+                    "arguments": audit_tool_args(tool, arguments),
+                }
+                for tool, arguments in oracle[name]
+            ],
+        }
+        for name in sorted(oracle)
+    ]
+    payload = json.dumps(
+        safe_matrix,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    assert hashlib.sha256(payload.encode("utf-8")).hexdigest() == (
+        "76ff6e4b7dcd22e14cdbcf824ffc6d23abe91f15e2f86d3136ef7f4c5f731f40"
+    )
+
+
+def test_unavailable_git_diff_evidence_cannot_pass(monkeypatch) -> None:
+    def unavailable_git_diff(self: BashExecutor, path: str = "") -> ToolResult:
+        return ToolResult(
+            tool="git_diff",
+            output="No git repository found for this workspace.",
+            returncode=0,
+            duration_ms=0,
+            args={"path": path},
+        )
+
+    monkeypatch.setattr(BashExecutor, "git_diff", unavailable_git_diff)
+
+    case = run_suite({"single-file-fix"})["cases"][0]
+    assert case["passed"] is False
+    assert case["real_git_diff"] is False
+    assert "GitDiffEvidenceMissing" in case["validation_errors"]
+
+
+def test_verified_patch_suite_covers_all_eleven_policy_cases() -> None:
     report = run_suite()
 
-    assert report["schema_version"] == 1
-    assert report["aggregate"]["cases"] == 3
-    assert report["aggregate"]["success"] == 3
-    assert report["aggregate"]["verified"] == 3
-    assert report["aggregate"]["unrelated_changes"] == 0
-    assert {case["category"] for case in report["cases"]} == {
-        "single_file_fix",
-        "no_change_explanation",
-        "failure_recovery",
-    }
-    assert all(case["success"] and case["verified"] for case in report["cases"])
-    assert all(case["tool_calls"] >= case["steps"] for case in report["cases"])
-    assert all(not case["unrelated_changes"] for case in report["cases"])
+    assert report["schema_version"] == 2
+    assert report["suite"] == "verified-patch-v0.3.2"
+    assert report["aggregate"]["cases"] == 11
+    assert report["aggregate"]["passed"] == 11
+    assert report["aggregate"]["unexpected_submissions"] == 0
+    assert report["aggregate"]["unrelated_change_count"] == 0
+    assert all(case["passed"] for case in report["cases"])
+    single = next(case for case in report["cases"] if case["name"] == "single-file-fix")
+    assert single["real_git_diff"] is True
 
-    explain = next(case for case in report["cases"] if case["name"] == "explain-only")
-    recovery = next(
-        case for case in report["cases"] if case["name"] == "failed-fix-recovery"
-    )
-    assert explain["workspace_changes"] == {
-        "created": [],
-        "deleted": [],
-        "modified": [],
-    }
-    assert recovery["recovered_from_failure"] is True
-    assert recovery["test_returncodes"][-1] == 0
+    assert report["harness"]["offline"] is True
+    assert report["harness"]["network"] == "disabled"
+    assert set(report["harness"]["python"]) == {"major", "minor"}
+    assert isinstance(report["harness"]["platform"], str)
 
-    # The public report must stay machine-readable without custom encoders.
-    json.dumps(report)
+    # The public report must stay machine-readable without private oracle material.
+    rendered = json.dumps(report)
+    for forbidden in (
+        '"args"',
+        "argument_signature",
+        "sha256",
+        "return a - b",
+        "return total * (1 - rate)",
+        "printf unsafe",
+        "Fixed add() and verified the test suite.",
+        "test_invoice.py",
+        "mca-eval-",
+        "/Users/",
+    ):
+        assert forbidden not in rendered
+
+
+def test_refusal_cases_report_expected_runtime_policy_evidence() -> None:
+    cases = {case["name"]: case for case in run_suite()["cases"]}
+
+    assert "VerificationRequired" in cases["premature-submission"]["refusal_evidence"]
+    assert "VerificationRequired" in cases["stale-verification"]["refusal_evidence"]
+    assert "VerificationFailed" in cases["failed-test-refusal"]["refusal_evidence"]
+    assert {
+        "NoTestsCollected",
+        "VerificationFailed",
+    }.issubset(cases["zero-test-refusal"]["refusal_evidence"])
+    assert "ShellDisabled" in cases["shell-disabled"]["refusal_evidence"]
+
+    for name in ("failed-test-refusal", "zero-test-refusal"):
+        case = cases[name]
+        assert case["outcome"] == "refused"
+        assert case["accepted_submission"] is False
+
+
+def test_resume_and_undo_report_sanitized_lifecycle_evidence() -> None:
+    cases = {case["name"]: case for case in run_suite()["cases"]}
+
+    resume = cases["checkpoint-resume"]
+    assert resume["outcome"] == "submitted"
+    assert resume["checkpoint_safe_boundary"] is True
+    assert resume["fresh_test_after_checkpoint"] is True
+    assert resume["tests"][-1]["returncode"] == 0
+    assert resume["tests"][-1]["tests_run"] == 1
+
+    undo = cases["authenticated-undo"]
+    assert undo["outcome"] == "reverted"
+    assert undo["authenticated_restoration"] is True
+    assert undo["restored_original"] is True
+
+    # Sanitized case reports expose evidence, never persistence artifacts.
+    rendered = json.dumps(report := run_suite())
+    for forbidden in ("trajectory", "journal", "undo_records", "state_dir"):
+        assert forbidden not in rendered.lower()
+    assert report["aggregate"]["expected_refusals"] == 2
+
+
+def test_test_evidence_includes_returncode_and_tests_run() -> None:
+    report = run_suite({"single-file-fix", "zero-test-refusal"})
+
+    assert report["schema_version"] == 2
+    assert report["suite"] == "verified-patch-v0.3.2"
+    assert report["aggregate"]["cases"] == 2
+    for case in report["cases"]:
+        assert case["tests"]
+        assert all(set(test) == {"returncode", "tests_run"} for test in case["tests"])
 
 
 def test_eval_cli_accepts_explicit_json_output_mode(capsys) -> None:
     assert main(["--json", "--case", "explain-only"]) == 0
 
     report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == 2
+    assert report["suite"] == "verified-patch-v0.3.2"
     assert report["aggregate"]["cases"] == 1
-    assert report["aggregate"]["success"] == 1
+    assert report["aggregate"]["passed"] == 1

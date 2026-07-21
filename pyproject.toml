@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-code-agent-langgraph"
-version = "0.3.1"
+version = "0.3.2"
 description = "A secure, resumable LangGraph CLI agent for coding and persistent chat."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,6 +41,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8,<10",
+    "PyYAML>=6.0.2,<7",
 ]
 
 [project.scripts]
