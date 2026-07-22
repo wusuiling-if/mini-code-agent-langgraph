@@ -35,6 +35,7 @@ SANDBOX_JOB_POLICY = {
         "runner": "ubuntu-22.04",
         "backend": "bwrap",
         "preparation": "sudo apt-get update\nsudo apt-get install -y bubblewrap\n",
+        "preparation_name": "Install bubblewrap",
     },
     "docker": {
         "runner": "ubuntu-latest",
@@ -214,7 +215,11 @@ def _assert_release_permissions_are_narrow(workflow: str) -> None:
 
 
 def _sandbox_jobs(workflow: str) -> dict[str, dict[str, Node]]:
-    _, job_nodes = _workflow_nodes(workflow, "sandbox.yml")
+    root, job_nodes = _workflow_nodes(workflow, "sandbox.yml")
+    assert set(root) == {"name", "on", "permissions", "concurrency", "jobs"}, (
+        "sandbox.yml root keys must match the approved structure"
+    )
+    assert _scalar_value(root["name"], "sandbox.yml name") == "sandbox"
     assert set(job_nodes) == set(SANDBOX_JOB_POLICY)
     return {
         job_name: _node_mapping(job_node, f"sandbox.yml job {job_name}")
@@ -232,64 +237,34 @@ def _sandbox_steps(job_name: str, job: dict[str, Node]) -> tuple[dict[str, Node]
     )
 
 
-def _assert_enabled_run_step(
-    steps: tuple[dict[str, Node], ...],
+def _assert_exact_run_step(
+    step: dict[str, Node],
     command: str,
     context: str,
+    *,
+    name: str | None = None,
 ) -> None:
-    matches: list[dict[str, Node]] = []
-    for index, step in enumerate(steps):
-        if "run" not in step:
-            continue
-        run = _scalar_value(step["run"], f"{context} step {index + 1} run")
-        if run == command:
-            matches.append(step)
-
-    assert len(matches) == 1, (
-        f"{context} must define exactly one independent run step for {command!r}"
-    )
-    assert "if" not in matches[0], f"{context} command {command!r} must be unconditional"
-
-
-def _assert_sandbox_job_commands(workflow: str, job_name: str) -> None:
-    job = _sandbox_jobs(workflow)[job_name]
-    backend = SANDBOX_JOB_POLICY[job_name]["backend"]
-    steps = _sandbox_steps(job_name, job)
-    commands = (
-        SANDBOX_JOB_POLICY[job_name]["preparation"],
-        'python -m pip install -e ".[dev]"',
-        (
-            f"MCA_SANDBOX_BACKEND={backend} python -m pytest "
-            "tests/test_sandbox_integration.py -q"
-        ),
-        f"mca sandbox probe --sandbox {backend}",
-    )
-    for command in commands:
-        _assert_enabled_run_step(steps, command, f"sandbox.yml job {job_name}")
+    expected_keys = {"run"} if name is None else {"name", "run"}
+    assert set(step) == expected_keys, f"{context} keys must match {expected_keys}"
+    if name is not None:
+        assert _scalar_value(step["name"], f"{context} name") == name
+    assert _scalar_value(step["run"], f"{context} run") == command
 
 
 def _assert_sandbox_checkout_is_hardened(
-    steps: tuple[dict[str, Node], ...],
+    checkout_step: dict[str, Node],
     job_name: str,
 ) -> None:
     checkout = f"actions/checkout@{APPROVED_ACTIONS['actions/checkout']}"
-    checkout_steps = [
-        step
-        for step in steps
-        if "uses" in step
-        and _scalar_value(step["uses"], f"sandbox.yml job {job_name} uses")
-        == checkout
-    ]
-    assert len(checkout_steps) == 1, (
-        f"sandbox.yml job {job_name} must use exactly one approved checkout step"
-    )
-    checkout_step = checkout_steps[0]
-    assert "if" not in checkout_step, (
-        f"sandbox.yml job {job_name} checkout must be unconditional"
-    )
     assert "with" in checkout_step, (
         f"sandbox.yml job {job_name} checkout needs explicit inputs"
     )
+    assert set(checkout_step) == {"uses", "with"}, (
+        f"sandbox.yml job {job_name} checkout keys must match the approved structure"
+    )
+    assert _scalar_value(
+        checkout_step["uses"], f"sandbox.yml job {job_name} checkout uses"
+    ) == checkout
     inputs = _node_mapping(
         checkout_step["with"], f"sandbox.yml job {job_name} checkout inputs"
     )
@@ -304,20 +279,69 @@ def _assert_sandbox_checkout_is_hardened(
     )
 
 
+def _assert_sandbox_setup_python_is_hardened(
+    setup_step: dict[str, Node],
+    job_name: str,
+) -> None:
+    setup_python = f"actions/setup-python@{APPROVED_ACTIONS['actions/setup-python']}"
+    assert set(setup_step) == {"uses", "with"}, (
+        f"sandbox.yml job {job_name} setup-python keys must match the approved structure"
+    )
+    assert _scalar_value(
+        setup_step["uses"], f"sandbox.yml job {job_name} setup-python uses"
+    ) == setup_python
+    assert _scalar_mapping(
+        setup_step["with"], f"sandbox.yml job {job_name} setup-python inputs"
+    ) == {
+        "python-version": "3.11",
+        "cache": "pip",
+        "cache-dependency-path": "pyproject.toml",
+    }
+
+
 def _assert_sandbox_workflow_is_hardened(workflow: str) -> None:
     jobs = _sandbox_jobs(workflow)
     for job_name, policy in SANDBOX_JOB_POLICY.items():
         job = jobs[job_name]
-        assert "if" not in job, f"sandbox.yml job {job_name} must be unconditional"
-        assert "uses" not in job, (
-            f"sandbox.yml job {job_name} must use executable steps, not a reusable job"
+        assert set(job) == {"runs-on", "timeout-minutes", "steps"}, (
+            f"sandbox.yml job {job_name} keys must match the approved structure"
         )
         assert _scalar_value(
             job["runs-on"], f"sandbox.yml job {job_name} runs-on"
         ) == policy["runner"]
-        _assert_sandbox_job_commands(workflow, job_name)
+        timeout = job["timeout-minutes"]
+        assert isinstance(timeout, ScalarNode)
+        assert timeout.tag == "tag:yaml.org,2002:int"
+        assert timeout.value == "15"
         steps = _sandbox_steps(job_name, job)
-        _assert_sandbox_checkout_is_hardened(steps, job_name)
+        assert len(steps) == 6, f"sandbox.yml job {job_name} must define exactly six steps"
+        _assert_sandbox_checkout_is_hardened(steps[0], job_name)
+        _assert_sandbox_setup_python_is_hardened(steps[1], job_name)
+        _assert_exact_run_step(
+            steps[2],
+            policy["preparation"],
+            f"sandbox.yml job {job_name} preparation",
+            name=policy.get("preparation_name"),
+        )
+        _assert_exact_run_step(
+            steps[3],
+            'python -m pip install -e ".[dev]"',
+            f"sandbox.yml job {job_name} package install",
+        )
+        backend = policy["backend"]
+        _assert_exact_run_step(
+            steps[4],
+            (
+                f"MCA_SANDBOX_BACKEND={backend} python -m pytest "
+                "tests/test_sandbox_integration.py -q"
+            ),
+            f"sandbox.yml job {job_name} integration probe",
+        )
+        _assert_exact_run_step(
+            steps[5],
+            f"mca sandbox probe --sandbox {backend}",
+            f"sandbox.yml job {job_name} CLI probe",
+        )
         for index, step in enumerate(steps):
             if "uses" not in step:
                 continue
@@ -537,8 +561,8 @@ def test_sandbox_policy_rejects_disabled_critical_step():
     )
     assert mutated != workflow
 
-    with pytest.raises(AssertionError, match="must be unconditional"):
-        _assert_sandbox_job_commands(mutated, "bwrap")
+    with pytest.raises(AssertionError, match="keys must match"):
+        _assert_sandbox_workflow_is_hardened(mutated)
 
 
 def test_sandbox_policy_rejects_command_hidden_in_comment():
@@ -547,8 +571,8 @@ def test_sandbox_policy_rejects_command_hidden_in_comment():
     mutated = workflow.replace(f"      - run: {command}", f"      # {command}")
     assert mutated != workflow
 
-    with pytest.raises(AssertionError, match="must define exactly one independent"):
-        _assert_sandbox_job_commands(mutated, "docker")
+    with pytest.raises(AssertionError):
+        _assert_sandbox_workflow_is_hardened(mutated)
 
 
 def test_sandbox_policy_rejects_checkout_with_persisted_credentials():
@@ -558,6 +582,78 @@ def test_sandbox_policy_rejects_checkout_with_persisted_credentials():
     assert mutated != workflow
 
     with pytest.raises(AssertionError, match="checkout needs explicit inputs"):
+        _assert_sandbox_workflow_is_hardened(mutated)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "defaults:\n  run:\n    shell: bash\n",
+        "env:\n  PIP_CONFIG_FILE: /tmp/unsafe\n",
+    ],
+)
+def test_sandbox_policy_rejects_root_execution_overrides(override):
+    workflow = _workflow("sandbox.yml")
+    mutated = workflow.replace("name: sandbox\n", f"name: sandbox\n{override}", 1)
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
+        _assert_sandbox_workflow_is_hardened(mutated)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "    continue-on-error: true\n",
+        "    defaults:\n      run:\n        shell: bash\n",
+        "    container: python:3.11-slim\n",
+        "    env:\n      MCA_SANDBOX_BACKEND: none\n",
+        "    strategy:\n      fail-fast: false\n",
+    ],
+)
+def test_sandbox_policy_rejects_job_execution_overrides(override):
+    workflow = _workflow("sandbox.yml")
+    mutated = workflow.replace("  docker:\n", f"  docker:\n{override}", 1)
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
+        _assert_sandbox_workflow_is_hardened(mutated)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "        continue-on-error: true\n",
+        "        shell: bash {0} || true\n",
+        "        env:\n          MCA_SANDBOX_BACKEND: none\n",
+        "        working-directory: /tmp\n",
+    ],
+)
+def test_sandbox_policy_rejects_critical_run_step_overrides(override):
+    workflow = _workflow("sandbox.yml")
+    command = "mca sandbox probe --sandbox docker"
+    mutated = workflow.replace(
+        f"      - run: {command}\n",
+        f"      - run: {command}\n{override}",
+        1,
+    )
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
+        _assert_sandbox_workflow_is_hardened(mutated)
+
+
+def test_sandbox_policy_rejects_disabled_setup_python_action():
+    workflow = _workflow("sandbox.yml")
+    setup_python = f"actions/setup-python@{APPROVED_ACTIONS['actions/setup-python']}"
+    mutated = workflow.replace(
+        f"      - uses: {setup_python}",
+        f"      - uses: {setup_python}\n        if: false",
+        1,
+    )
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
         _assert_sandbox_workflow_is_hardened(mutated)
 
 
