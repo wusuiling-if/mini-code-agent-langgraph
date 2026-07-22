@@ -185,7 +185,7 @@ def execute_tool_batch(
         )
 
     results: list[ToolResult | None] = [None] * len(normalized)
-    ignored = ignore_paths or set()
+    ignored = set(ignore_paths or set())
     try:
         current_fingerprint = capture_workspace_fingerprint(
             executor, ignore_paths=ignored
@@ -209,7 +209,11 @@ def execute_tool_batch(
             continue
         # Only the command configured by the user/CLI is authoritative. A model-
         # supplied command (including `true`) must never mint a verification token.
-        effective_args = {} if name == "run_tests" else args
+        effective_args = (
+            {"_verification_ignore_paths": set(ignored)}
+            if name == "run_tests"
+            else args
+        )
         try:
             result = executor.execute_tool(name, effective_args)
         except Exception as exc:
@@ -261,8 +265,31 @@ def execute_tool_batch(
                 results[index] = result
                 continue
         if name == "run_tests":
+            if (
+                result.returncode == 0
+                and (
+                    result.verification_boundary_checked
+                    or bool(result.verification_checks)
+                )
+                and (
+                    not result.verification_fingerprint
+                    or result.verification_fingerprint
+                    != current_fingerprint
+                )
+            ):
+                result.returncode = -1
+                result.exception_info = (
+                    "WorkspaceChangedDuringVerification"
+                )
+                result.output = (
+                    f"{result.output}\n\n"
+                    "The verification fingerprint was missing or changed "
+                    "at the executor handoff; submission evidence was not "
+                    "minted."
+                )
             gate.record_test(
-                passed=result.returncode == 0, fingerprint=current_fingerprint
+                passed=result.returncode == 0,
+                fingerprint=current_fingerprint,
             )
         else:
             gate.sync(current_fingerprint)

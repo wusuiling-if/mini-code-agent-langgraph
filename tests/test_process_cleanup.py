@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 import mini_code_agent.executor as executor_module
+from mini_code_agent.checks import VerificationCheck
+from mini_code_agent.contracts import ToolResult
 from mini_code_agent.executor import BashExecutor, _DockerRunMetadata
 
 
@@ -133,3 +135,37 @@ def test_docker_runs_as_the_invoking_user_with_private_env(
     assert argv[argv.index("--user") + 1] == "1234:5678"
     assert "HOME=/tmp" in argv
     assert "TMPDIR=/tmp" in argv
+
+
+def test_matrix_stops_before_the_next_check_after_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executor = BashExecutor(
+        tmp_path,
+        approval_mode="yolo",
+        sandbox_mode="none",
+        verification_checks=(
+            VerificationCheck("slow", "slow command"),
+            VerificationCheck("later", "later command"),
+        ),
+    )
+    calls: list[str] = []
+
+    def fake_run_command(
+        tool: str, command: str, *, args: dict
+    ) -> ToolResult:
+        calls.append(command)
+        return ToolResult(
+            tool=tool,
+            output="timed out",
+            returncode=-1,
+            duration_ms=1,
+            exception_info="TimeoutExpired",
+        )
+
+    monkeypatch.setattr(executor, "_run_command", fake_run_command)
+
+    result = executor.execute_tool("run_tests", {})
+
+    assert calls == ["slow command"]
+    assert result.exception_info == "TimeoutExpired"

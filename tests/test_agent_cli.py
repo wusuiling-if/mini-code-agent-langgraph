@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage
 
 from mini_code_agent.agent import MiniCodeAgent
 from mini_code_agent.chat import ConversationalCodeAgent
+from mini_code_agent.checks import VerificationCheck
 from mini_code_agent.executor import BashExecutor
 from mini_code_agent.model import create_model
 from mini_code_agent.trajectory import load_trajectory, summarize_trajectory, undo_trajectory
@@ -316,3 +317,77 @@ def test_chat_session_can_answer_normally_and_complete_a_coding_turn(tmp_path: P
         for event in session.events
         if event.get("tool") != "run_tests"
     )
+
+
+class MatrixMutationRecoveryModel:
+    def __init__(self):
+        self.step = 0
+
+    def bind_tools(self, tools):
+        return self
+
+    def invoke(self, messages):
+        self.step += 1
+        name, args = {
+            1: ("run_tests", {}),
+            2: (
+                "apply_patch",
+                {"path": "value.py", "old": "VALUE = 2", "new": "VALUE = 1"},
+            ),
+            3: ("run_tests", {}),
+            4: ("submit", {"summary": "recovered and verified"}),
+        }[self.step]
+        return AIMessage(
+            content=name,
+            tool_calls=[
+                {
+                    "name": name,
+                    "args": args,
+                    "id": f"recover-{self.step}",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+
+def test_matrix_mutation_is_refused_then_repaired_and_rerun(
+    tmp_path: Path,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
+    marker = tmp_path / "mutated-once"
+    command = (
+        f"{shlex.quote(sys.executable)} -c "
+        + shlex.quote(
+            "from pathlib import Path; "
+            f"marker=Path({str(marker)!r}); "
+            "value=Path('value.py'); "
+            "first=not marker.exists(); "
+            "value.write_text('VALUE = 2\\n') if first else None; "
+            "marker.write_text('done') if first else None; "
+            "print('Ran 1 test')"
+        )
+    )
+    trajectory = MiniCodeAgent(
+        MatrixMutationRecoveryModel(),
+        BashExecutor(
+            repo,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            verification_checks=(VerificationCheck("tests", command),),
+        ),
+        quiet=True,
+    ).run("verify without accepting check mutations")
+
+    test_events = [
+        event
+        for event in trajectory["events"]
+        if event.get("tool") == "run_tests"
+    ]
+    assert test_events[0]["exception_info"] == (
+        "WorkspaceChangedDuringVerification"
+    )
+    assert test_events[1]["returncode"] == 0
+    assert trajectory["exit_status"] == "Submitted"
+    assert (repo / "value.py").read_text(encoding="utf-8") == "VALUE = 1\n"

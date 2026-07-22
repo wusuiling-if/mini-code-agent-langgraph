@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import shlex
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,12 +26,17 @@ from mini_code_agent.agent import (
     execute_tool_batch,
 )
 from mini_code_agent.chat import MAX_PERSISTED_EVENTS, ConversationalCodeAgent, TurnResult
+from mini_code_agent.checks import (
+    VerificationCheck,
+    VerificationCheckEvidence,
+)
 from mini_code_agent.cli import (
     ChatAccessController,
     _git_dirty,
     _load_runtime_env,
     build_parser,
 )
+from mini_code_agent.contracts import ToolResult
 from mini_code_agent.executor import BashExecutor
 from mini_code_agent.model import create_model
 from mini_code_agent.trajectory import (
@@ -929,3 +936,127 @@ def test_docker_sandbox_uses_the_configured_prepulled_image(
     assert "--pull=never" in argv
     assert "local/mca-node:20" in argv
     assert argv[-2:] == ["node", "--version"]
+
+
+def test_matrix_uses_the_same_trusted_ignore_paths_inside_executor_and_gate(
+    tmp_path: Path,
+):
+    artifact = tmp_path / "run.json"
+    command = (
+        f"{shlex.quote(sys.executable)} -c "
+        + shlex.quote(
+            "from pathlib import Path; "
+            "Path('run.json').write_text('runtime artifact'); "
+            "print('check passed')"
+        )
+    )
+    executor = BashExecutor(
+        tmp_path,
+        approval_mode="yolo",
+        sandbox_mode="none",
+        verification_checks=(VerificationCheck("tests", command),),
+    )
+    baseline = capture_workspace_fingerprint(
+        executor, ignore_paths={artifact}
+    )
+    gate = VerificationGate.create(baseline, require_verification=True)
+
+    outcome = execute_tool_batch(
+        executor,
+        [{"name": "run_tests", "args": {}, "id": "checks"}],
+        gate,
+        ignore_paths={artifact},
+    )
+    result = outcome.calls[0].result
+
+    assert artifact.read_text(encoding="utf-8") == "runtime artifact"
+    assert result.returncode == 0
+    assert result.verification_boundary_checked is True
+    assert result.verification_fingerprint == baseline
+    assert gate.status == "passed"
+
+
+@pytest.mark.parametrize(
+    ("matrix_evidence", "internal_fingerprint", "post_fingerprint"),
+    [(True, "f0", "f1"), (True, "", "f0"), (False, "", "f0")],
+    ids=("matrix-different", "matrix-missing", "legacy-missing"),
+)
+def test_verification_handoff_requires_matching_internal_fingerprint(
+    tmp_path: Path,
+    matrix_evidence: bool,
+    internal_fingerprint: str,
+    post_fingerprint: str,
+):
+    artifact = tmp_path / "run.json"
+
+    class IdentityRedactor:
+        def redact_text(self, value: str) -> str:
+            return value
+
+        def redact_data(self, value):
+            return value
+
+    class HandoffExecutor:
+        cwd = tmp_path
+        redactor = IdentityRedactor()
+
+        def __init__(self):
+            self.captures = 0
+            self.received_args = None
+
+        def workspace_fingerprint(self, *, ignore_paths=None):
+            self.captures += 1
+            return "f0" if self.captures == 1 else post_fingerprint
+
+        def execute_tool(self, name: str, args: dict) -> ToolResult:
+            self.received_args = args
+            return ToolResult(
+                tool=name,
+                output="passed",
+                returncode=0,
+                duration_ms=1,
+                verification_checks=(
+                    (
+                        VerificationCheckEvidence(
+                            name="tests", returncode=0, duration_ms=1
+                        ),
+                    )
+                    if matrix_evidence
+                    else ()
+                ),
+                verification_boundary_checked=not matrix_evidence,
+                verification_fingerprint=internal_fingerprint,
+            )
+
+        def sandbox_status(self) -> str:
+            return "fake"
+
+    executor = HandoffExecutor()
+    gate = VerificationGate.create("f0", require_verification=True)
+    outcome = execute_tool_batch(
+        executor,
+        [
+            {
+                "name": "run_tests",
+                "args": {"_verification_ignore_paths": ["malicious"]},
+                "id": "checks",
+            },
+            {
+                "name": "submit",
+                "args": {"summary": "must fail"},
+                "id": "submit",
+            },
+        ],
+        gate,
+        ignore_paths={artifact},
+    )
+    results = {call.tool_call_id: call.result for call in outcome.calls}
+
+    assert executor.received_args == {
+        "_verification_ignore_paths": {artifact}
+    }
+    assert results["checks"].exception_info == (
+        "WorkspaceChangedDuringVerification"
+    )
+    assert results["submit"].blocked is True
+    assert gate.status == "failed"

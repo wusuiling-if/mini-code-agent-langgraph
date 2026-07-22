@@ -17,8 +17,15 @@ from difflib import unified_diff
 from dataclasses import dataclass
 from pathlib import Path
 from shlex import join as shlex_join
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
+from mini_code_agent.checks import (
+    VerificationCheck,
+    VerificationCheckEvidence,
+    VerificationCheckExecution,
+    normalize_verification_checks,
+    run_verification_matrix,
+)
 from mini_code_agent.contracts import ToolResult
 from mini_code_agent.security import SafeWorkspace, SecretRedactor
 from mini_code_agent.utils import DEFAULT_OUTPUT_LIMIT, truncate_text
@@ -130,6 +137,7 @@ class BashExecutor:
         approval_mode: Literal["confirm", "yolo"] = "confirm",
         allow_shell: bool = False,
         default_test_command: str | None = None,
+        verification_checks: Sequence[VerificationCheck] = (),
         allow_zero_tests: bool = False,
         sandbox_mode: Literal["auto", "sandbox-exec", "bwrap", "docker", "none"] = "auto",
         docker_image: str = "python:3.11-slim",
@@ -146,6 +154,11 @@ class BashExecutor:
                 raise ValueError("default_test_command must not be blank")
             default_test_command = default_test_command.strip()
         self.default_test_command = default_test_command
+        explicit_checks = tuple(verification_checks)
+        self.verification_checks = normalize_verification_checks(
+            default_test_command, explicit_checks
+        )
+        self._strict_verification_matrix = bool(explicit_checks)
         self.allow_zero_tests = allow_zero_tests
         self.sandbox_mode = sandbox_mode
         if not isinstance(docker_image, str) or not docker_image.strip():
@@ -211,7 +224,19 @@ class BashExecutor:
                 case "git_diff":
                     return self.git_diff(str(args.get("path", "")))
                 case "run_tests":
-                    return self.run_tests(args.get("command"))
+                    raw_ignore_paths = args.get("_verification_ignore_paths")
+                    ignore_paths = (
+                        raw_ignore_paths
+                        if isinstance(raw_ignore_paths, set)
+                        and all(
+                            isinstance(path, Path)
+                            for path in raw_ignore_paths
+                        )
+                        else None
+                    )
+                    return self.run_tests(
+                        args.get("command"), ignore_paths=ignore_paths
+                    )
                 case "submit":
                     return self.submit(str(args.get("summary", "")))
         except Exception as exc:
@@ -617,49 +642,65 @@ class BashExecutor:
             args={"path": path},
         )
 
-    def run_tests(self, command: str | None = None) -> ToolResult:
-        if self.default_test_command is None:
+    def run_tests(
+        self,
+        command: str | None = None,
+        *,
+        ignore_paths: set[Path] | None = None,
+    ) -> ToolResult:
+        if not self.verification_checks:
             return ToolResult(
                 tool="run_tests",
                 command="",
                 output=(
-                    "No authoritative test command is configured. Restart with "
-                    "--test-command '<command>'."
+                    "No authoritative verification check is configured. Restart "
+                    "with --test-command '<command>' or --check NAME '<command>'."
                 ),
                 returncode=-1,
                 duration_ms=0,
                 exception_info="TestCommandRequired",
                 blocked=True,
             )
-        command = self.default_test_command if command is None else command
-        if not isinstance(command, str) or not command.strip():
-            return ToolResult(
-                tool="run_tests",
-                command="",
-                output="The configured test command must not be blank.",
-                returncode=-1,
-                duration_ms=0,
-                exception_info="InvalidTestCommand",
-                blocked=True,
+        if command is not None:
+            if not isinstance(command, str) or not command.strip():
+                return ToolResult(
+                    tool="run_tests",
+                    command="",
+                    output="The configured test command must not be blank.",
+                    returncode=-1,
+                    duration_ms=0,
+                    exception_info="InvalidTestCommand",
+                    blocked=True,
+                )
+            command = command.strip()
+            legacy_match = (
+                not self._strict_verification_matrix
+                and self.default_test_command is not None
+                and command == self.default_test_command
             )
-        command = command.strip()
-        # Only the user-configured command is authoritative.  Arbitrary shell is
-        # a separate capability and must never let a model manufacture a passing
-        # verification result with e.g. ``run_tests('true')``.
-        if command != self.default_test_command:
-            return ToolResult(
-                tool="run_tests",
-                command=self.redactor.redact_text(command),
-                output=(
-                    "Custom test commands are disabled. Use run_tests without a command "
-                    "or configure --test-command before starting the agent."
-                ),
-                returncode=-1,
-                duration_ms=0,
-                args={"command": self.redactor.redact_text(command)},
-                exception_info="CustomTestCommandDisabled",
-                blocked=True,
+            if not legacy_match:
+                return ToolResult(
+                    tool="run_tests",
+                    command=self.redactor.redact_text(command),
+                    output=(
+                        "Custom verification commands are disabled. Call run_tests "
+                        "without arguments and configure commands before startup."
+                    ),
+                    returncode=-1,
+                    duration_ms=0,
+                    exception_info="CustomTestCommandDisabled",
+                    blocked=True,
+                )
+        if not self._strict_verification_matrix:
+            return self._run_legacy_test(
+                self.default_test_command or "",
+                ignore_paths=ignore_paths or set(),
             )
+        return self._run_test_matrix(ignore_paths=ignore_paths or set())
+
+    def _run_legacy_test(
+        self, command: str, *, ignore_paths: set[Path]
+    ) -> ToolResult:
         blocked_reason = self._blocked_command_reason(command)
         if blocked_reason:
             return ToolResult(
@@ -683,7 +724,59 @@ class BashExecutor:
                 exception_info="User rejected test command.",
                 approved=False,
             )
-        result = self._run_command("run_tests", command, args={"command": command})
+        try:
+            baseline = self.workspace_fingerprint(
+                ignore_paths=ignore_paths
+            ).fingerprint
+        except Exception:
+            return ToolResult(
+                tool="run_tests",
+                command=self.redactor.redact_text(command),
+                output=(
+                    "Workspace fingerprint capture failed before "
+                    "verification."
+                ),
+                returncode=-1,
+                duration_ms=0,
+                args={"command": self.redactor.redact_text(command)},
+                exception_info="WorkspaceFingerprintError",
+            )
+        result = self._apply_test_count(
+            self._run_command(
+                "run_tests", command, args={"command": command}
+            )
+        )
+        try:
+            after = self.workspace_fingerprint(
+                ignore_paths=ignore_paths
+            ).fingerprint
+        except Exception:
+            result.output = truncate_text(
+                f"{result.output}\n\n"
+                "Workspace fingerprint capture failed after verification.",
+                DEFAULT_OUTPUT_LIMIT,
+            )
+            result.returncode = -1
+            result.exception_info = "WorkspaceFingerprintError"
+            return result
+        result.verification_boundary_checked = True
+        if after != baseline:
+            result.output = truncate_text(
+                f"{result.output}\n\n"
+                "Test command changed the fingerprinted workspace; "
+                "submission evidence was not minted.",
+                DEFAULT_OUTPUT_LIMIT,
+            )
+            result.returncode = -1
+            result.exception_info = (
+                "WorkspaceChangedDuringVerification"
+            )
+            return result
+        if result.returncode == 0:
+            result.verification_fingerprint = baseline
+        return result
+
+    def _apply_test_count(self, result: ToolResult) -> ToolResult:
         unittest_match = UNITTEST_COUNT.search(result.output)
         if unittest_match:
             result.tests_run = int(unittest_match.group(1))
@@ -696,6 +789,89 @@ class BashExecutor:
                 result.returncode = 1
                 result.exception_info = "NoTestsCollected"
         return result
+
+    def _run_test_matrix(self, *, ignore_paths: set[Path]) -> ToolResult:
+        for check in self.verification_checks:
+            blocked_reason = self._blocked_command_reason(check.command)
+            if blocked_reason:
+                evidence = VerificationCheckEvidence(
+                    name=check.name,
+                    returncode=-1,
+                    duration_ms=0,
+                    exception_info=blocked_reason,
+                    blocked=True,
+                )
+                return ToolResult(
+                    tool="run_tests",
+                    command="<verification matrix>",
+                    output=f"Verification check {check.name} was blocked by policy.",
+                    returncode=-1,
+                    duration_ms=0,
+                    exception_info=blocked_reason,
+                    blocked=True,
+                    verification_checks=(evidence,),
+                )
+
+        detail = "\n".join(
+            f"{check.name}: {self.redactor.redact_text(check.command)}"
+            for check in self.verification_checks
+        )
+        if self.approval_mode == "confirm" and not self._confirm(
+            "run_tests", detail
+        ):
+            return ToolResult(
+                tool="run_tests",
+                command="<verification matrix>",
+                output="Verification matrix was rejected by the user.",
+                returncode=-1,
+                duration_ms=0,
+                exception_info="User rejected verification matrix.",
+                approved=False,
+            )
+
+        def execute(check: VerificationCheck) -> VerificationCheckExecution:
+            result = self._apply_test_count(
+                self._run_command("run_tests", check.command, args={})
+            )
+            return VerificationCheckExecution(
+                evidence=VerificationCheckEvidence(
+                    name=check.name,
+                    returncode=result.returncode,
+                    duration_ms=result.duration_ms,
+                    tests_run=result.tests_run,
+                    exception_info=(
+                        result.exception_info.partition(":")[0]
+                        if result.exception_info
+                        else ""
+                    ),
+                    blocked=result.blocked,
+                    approved=result.approved,
+                ),
+                output=result.output,
+            )
+
+        matrix = run_verification_matrix(
+            self.verification_checks,
+            capture_fingerprint=lambda: self.workspace_fingerprint(
+                ignore_paths=ignore_paths
+            ).fingerprint,
+            execute_check=execute,
+        )
+        return ToolResult(
+            tool="run_tests",
+            command="<verification matrix>",
+            output=self.redactor.redact_text(matrix.output),
+            returncode=matrix.returncode,
+            duration_ms=sum(
+                item.duration_ms for item in matrix.verification_checks
+            ),
+            exception_info=matrix.exception_info,
+            approved=matrix.approved,
+            blocked=matrix.blocked,
+            verification_checks=matrix.verification_checks,
+            verification_boundary_checked=matrix.returncode == 0,
+            verification_fingerprint=matrix.verification_fingerprint,
+        )
 
     def submit(self, summary: str = "") -> ToolResult:
         submission = summary.strip()
