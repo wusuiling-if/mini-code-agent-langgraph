@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import shlex
 import socket
+import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,8 +54,10 @@ class _FakeExecutor:
         self._results = iter(
             (
                 ToolResult("bash", "sensitive write allowed", 0, 0),
+                ToolResult("bash", "protected\n", 0, 0),
                 ToolResult("bash", "sensitive write denied", 1, 0),
                 ToolResult("bash", "sensitive socket denied", 73, 0),
+                ToolResult("bash", "sensitive route denied", 73, 0),
                 ToolResult("bash", "sensitive network denied", 73, 0),
             )
         )
@@ -71,8 +75,10 @@ class _FakeOutsideWriteSucceeds(_FakeExecutor):
         self._results = iter(
             (
                 ToolResult("bash", "write allowed", 0, 0),
+                ToolResult("bash", "protected\n", 0, 0),
                 ToolResult("bash", "unexpectedly allowed", 0, 0),
                 ToolResult("bash", "socket denied", 73, 0),
+                ToolResult("bash", "route denied", 73, 0),
                 ToolResult("bash", "network denied", 73, 0),
             )
         )
@@ -87,9 +93,9 @@ class _FakeExecutorInspectingUnixListener(_FakeExecutor):
 
     def execute_bash(self, command: str) -> ToolResult:
         self._command_count += 1
-        if self._command_count == 3:
+        if self._command_count == 4:
             source = shlex.split(command)[2]
-            paths_source = source.split("paths=", 1)[1].split("; errors=", 1)[0]
+            paths_source = source.split("paths=", 1)[1].split("; visible=", 1)[0]
             paths = [Path(path) for path in ast.literal_eval(paths_source)]
             controlled_paths = [
                 path for path in paths if path.name == "host.sock"
@@ -100,6 +106,77 @@ class _FakeExecutorInspectingUnixListener(_FakeExecutor):
                     client.connect(str(controlled_paths[0]))
                 type(self).controlled_listener_was_live = True
         return super().execute_bash(command)
+
+
+@dataclass
+class _CommandRoutingExecutor:
+    workspace: object
+    approval_mode: str
+    allow_shell: bool
+    sandbox_mode: str
+    docker_image: str
+    timeout_seconds: int
+
+    unix_returncode = 73
+    udp_returncode = 73
+    tcp_returncode = 73
+    native_read_output = "protected\n"
+    native_read_returncode = 0
+    native_read_exception = ""
+    docker_visibility_returncode = 0
+    docker_visibility_exception = ""
+    mutation_returncode = 1
+    mutation_exception = ""
+
+    def __post_init__(self) -> None:
+        self.redactor = _Redactor()
+        self.commands: list[str] = []
+
+    def sandbox_probe(self) -> tuple[bool, str]:
+        return True, self.sandbox_mode
+
+    def sandbox_status(self) -> str:
+        return self.sandbox_mode
+
+    def execute_bash(self, command: str) -> ToolResult:
+        self.commands.append(command)
+        if ".mca-sandbox-probe-write" in command:
+            return ToolResult("bash", "", 0, 0)
+        if "AF_UNIX" in command:
+            return ToolResult("bash", "socket result", self.unix_returncode, 0)
+        if "SOCK_DGRAM" in command:
+            return ToolResult("bash", "route result", self.udp_returncode, 0)
+        if "AF_INET" in command and "SOCK_STREAM" in command:
+            return ToolResult("bash", "tcp result", self.tcp_returncode, 0)
+        if command.startswith("cat "):
+            return ToolResult(
+                "bash",
+                self.native_read_output,
+                self.native_read_returncode,
+                0,
+                exception_info=self.native_read_exception,
+            )
+        if command.startswith("test ! -e "):
+            return ToolResult(
+                "bash",
+                "",
+                self.docker_visibility_returncode,
+                0,
+                exception_info=self.docker_visibility_exception,
+            )
+        if "protected.txt" in command or "/mca-sandbox-probe-outside" in command:
+            return ToolResult(
+                "bash",
+                "write result",
+                self.mutation_returncode,
+                0,
+                exception_info=self.mutation_exception,
+            )
+        raise AssertionError(f"unexpected probe command: {command}")
+
+
+def _check(report: SandboxProbeReport, name: str) -> SandboxCheck:
+    return next(check for check in report.checks if check.name == name)
 
 
 def test_probe_rejects_none():
@@ -168,6 +245,235 @@ def test_unix_check_uses_live_controlled_listener_when_known_socket_is_stale(
 
         assert report.ok is True
         assert _FakeExecutorInspectingUnixListener.controlled_listener_was_live is True
+
+
+def test_network_fails_when_udp_route_exists_even_if_controlled_tcp_is_denied(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class RoutedNetworkExecutor(_CommandRoutingExecutor):
+        udp_returncode = 0
+
+    monkeypatch.setattr(probe_module, "BashExecutor", RoutedNetworkExecutor)
+
+    report = run_sandbox_probe(sandbox_mode="docker")
+
+    assert _check(report, "network").passed is False
+
+
+def test_udp_source_reports_blocked_route_without_claiming_physical_absence():
+    source = probe_module._udp_route_source()
+
+    assert "route-blocked:" in source
+    assert "no-route:" not in source
+
+
+def test_unix_source_distinguishes_visible_but_blocked_from_invisible(
+    tmp_path: Path,
+):
+    visible_non_socket = tmp_path / "visible"
+    visible_non_socket.write_text("not a socket", encoding="utf-8")
+
+    visible = subprocess.run(
+        [sys.executable, "-c", probe_module._unix_socket_source([visible_non_socket])],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    invisible = subprocess.run(
+        [sys.executable, "-c", probe_module._unix_socket_source([tmp_path / "missing"])],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert visible.returncode == 74
+    assert "visible-but-blocked" in visible.stdout
+    assert invisible.returncode == 73
+    assert "invisible" in invisible.stdout
+
+
+def test_sandbox_exec_allows_visible_but_blocked_unix_sockets(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class VisibleSocketExecutor(_CommandRoutingExecutor):
+        unix_returncode = 74
+
+    monkeypatch.setattr(probe_module, "BashExecutor", VisibleSocketExecutor)
+
+    report = run_sandbox_probe(sandbox_mode="sandbox-exec")
+
+    assert _check(report, "unix_socket").passed is True
+
+
+def test_docker_requires_unix_socket_invisibility(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class VisibleSocketExecutor(_CommandRoutingExecutor):
+        unix_returncode = 74
+
+    monkeypatch.setattr(probe_module, "BashExecutor", VisibleSocketExecutor)
+
+    report = run_sandbox_probe(sandbox_mode="docker")
+
+    assert _check(report, "unix_socket").passed is False
+
+
+def test_native_outside_write_first_reads_exact_absolute_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    created: list[_CommandRoutingExecutor] = []
+
+    class RecordingExecutor(_CommandRoutingExecutor):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            created.append(self)
+
+    monkeypatch.setattr(probe_module, "BashExecutor", RecordingExecutor)
+
+    report = run_sandbox_probe(sandbox_mode="sandbox-exec")
+
+    assert _check(report, "outside_write").passed is True
+    read_commands = [command for command in created[0].commands if command.startswith("cat ")]
+    assert len(read_commands) == 1
+    assert read_commands[0].endswith("/protected.txt")
+    assert not read_commands[0].endswith("../protected.txt")
+
+
+@pytest.mark.parametrize(
+    ("returncode", "exception_info"),
+    [(-1, ""), (1, "ExecutorFailure"), (-1, "TimeoutExpired")],
+    ids=["negative-return", "exception", "timeout"],
+)
+def test_native_outside_write_rejects_nonordinary_executor_results(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, exception_info: str
+):
+    class FailedMutationExecutor(_CommandRoutingExecutor):
+        mutation_returncode = returncode
+        mutation_exception = exception_info
+
+    monkeypatch.setattr(probe_module, "BashExecutor", FailedMutationExecutor)
+
+    report = run_sandbox_probe(sandbox_mode="sandbox-exec")
+
+    assert _check(report, "outside_write").passed is False
+
+
+def test_native_outside_write_fails_when_sentinel_content_is_not_exact(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class WrongSentinelExecutor(_CommandRoutingExecutor):
+        native_read_output = "wrong\n"
+
+    monkeypatch.setattr(probe_module, "BashExecutor", WrongSentinelExecutor)
+
+    report = run_sandbox_probe(sandbox_mode="bwrap")
+
+    assert _check(report, "outside_write").passed is False
+
+
+def test_docker_outside_write_requires_host_sentinel_invisibility(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FailedVisibilityExecutor(_CommandRoutingExecutor):
+        docker_visibility_returncode = -1
+        docker_visibility_exception = "DockerLaunchFailed"
+
+    monkeypatch.setattr(probe_module, "BashExecutor", FailedVisibilityExecutor)
+
+    report = run_sandbox_probe(sandbox_mode="docker")
+
+    assert _check(report, "outside_write").passed is False
+
+
+@pytest.mark.parametrize(
+    ("returncode", "exception_info"),
+    [(-1, ""), (1, "ExecutorFailure"), (-1, "TimeoutExpired")],
+    ids=["negative-return", "exception", "timeout"],
+)
+def test_docker_outside_write_rejects_nonordinary_root_write_results(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, exception_info: str
+):
+    class FailedMutationExecutor(_CommandRoutingExecutor):
+        mutation_returncode = returncode
+        mutation_exception = exception_info
+
+    monkeypatch.setattr(probe_module, "BashExecutor", FailedMutationExecutor)
+
+    report = run_sandbox_probe(sandbox_mode="docker")
+
+    assert _check(report, "outside_write").passed is False
+
+
+def test_probe_uses_var_tmp_for_sentinel_and_tmp_for_controlled_socket(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    real_temporary_directory = tempfile.TemporaryDirectory
+    selected_dirs: list[str | None] = []
+
+    def recording_temporary_directory(*args, **kwargs):
+        selected_dirs.append(kwargs.get("dir"))
+        return real_temporary_directory(*args, **kwargs)
+
+    monkeypatch.setattr(probe_module, "BashExecutor", _CommandRoutingExecutor)
+    monkeypatch.setattr(
+        probe_module.tempfile, "TemporaryDirectory", recording_temporary_directory
+    )
+
+    run_sandbox_probe(sandbox_mode="docker")
+
+    assert selected_dirs == ["/var/tmp", "/tmp"]
+
+
+def test_verified_host_temp_base_fails_closed_when_candidate_is_unavailable(
+    tmp_path: Path,
+):
+    missing = tmp_path / "missing"
+
+    assert probe_module._verified_host_temp_base(missing) is None
+
+
+def test_probe_reports_clear_failure_when_verified_host_temp_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(probe_module, "_verified_host_temp_base", lambda: None)
+
+    report = run_sandbox_probe(sandbox_mode="bwrap")
+
+    assert report.ok is False
+    assert [check.name for check in report.checks] == ["outside_write"]
+    assert "/var/tmp" in report.checks[0].detail
+    assert "unavailable or not writable" in report.checks[0].detail
+
+
+def test_verified_host_temp_base_cleans_up_after_writability_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    def fail_write(_fd: int, _data: bytes) -> int:
+        raise OSError("injected write failure")
+
+    monkeypatch.setattr(probe_module.os, "write", fail_write)
+
+    assert probe_module._verified_host_temp_base(tmp_path) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_combined_network_detail_respects_report_length_limit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class VerboseNetworkExecutor(_CommandRoutingExecutor):
+        def execute_bash(self, command: str) -> ToolResult:
+            result = super().execute_bash(command)
+            if "SOCK_DGRAM" in command or (
+                "AF_INET" in command and "SOCK_STREAM" in command
+            ):
+                result.output = "network-detail-" * 100
+            return result
+
+    monkeypatch.setattr(probe_module, "BashExecutor", VerboseNetworkExecutor)
+
+    report = run_sandbox_probe(sandbox_mode="docker")
+
+    assert len(_check(report, "network").detail) <= 500
 
 
 def test_detail_is_fully_redacted_before_final_length_limit():

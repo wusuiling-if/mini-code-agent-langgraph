@@ -199,3 +199,19 @@ def test_apply_patch_replace_lines_and_write_file_return_diffs(tmp_path: Path):
 def test_sandbox_probe_reports_explicitly_disabled_mode_as_usable(tmp_path: Path):
     executor = BashExecutor(tmp_path, approval_mode="yolo", sandbox_mode="none")
     assert executor.sandbox_probe() == (True, "disabled")
+
+
+def test_docker_argv_contains_exact_network_none_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    executor = BashExecutor(tmp_path, sandbox_mode="docker")
+    monkeypatch.setattr(
+        executor,
+        "_trusted_executable",
+        lambda name: "/usr/bin/docker" if name == "docker" else "",
+    )
+
+    argv = executor._sandboxed_argv(["/bin/sh", "-c", ":"])
+
+    network_index = argv.index("--network")
+    assert argv[network_index : network_index + 2] == ["--network", "none"]

@@ -14,7 +14,10 @@ from mini_code_agent.utils import truncate_text
 
 
 _CONNECTION_BLOCKED_EXIT = 73
+_SOCKET_VISIBLE_BLOCKED_EXIT = 74
 _DETAIL_LIMIT = 500
+_HOST_TEMP_BASE = Path("/var/tmp")
+_PROTECTED_CONTENT = "protected\n"
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,43 @@ def _result_detail(executor: Any, result: Any, summary: str) -> str:
     if exception_info:
         parts.append(exception_info)
     return _redact(executor, ": ".join(parts))
+
+
+def _returned(result: Any, returncode: int) -> bool:
+    return result.returncode == returncode and not str(
+        result.exception_info or ""
+    ).strip()
+
+
+def _ordinary_denial(result: Any) -> bool:
+    return result.returncode > 0 and not str(result.exception_info or "").strip()
+
+
+def _verified_host_temp_base(candidate: Path = _HOST_TEMP_BASE) -> Path | None:
+    """Return a host-visible temp base only after proving it writable."""
+
+    fd: int | None = None
+    raw_path: str | None = None
+    verified = False
+    try:
+        if not candidate.is_dir():
+            return None
+        fd, raw_path = tempfile.mkstemp(prefix=".mca-sandbox-probe-", dir=candidate)
+        verified = os.write(fd, b"verified\n") == len(b"verified\n")
+    except OSError:
+        verified = False
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                verified = False
+        if raw_path is not None:
+            try:
+                Path(raw_path).unlink()
+            except OSError:
+                verified = False
+    return candidate if verified else None
 
 
 def _python_command(source: str) -> str:
@@ -84,14 +124,19 @@ def _unix_socket_source(paths: list[Path]) -> str:
     return (
         "import socket,sys; "
         f"paths={raw_paths!r}; "
-        "errors=[]; "
+        "visible=[]; errors=[]; "
         "\nfor path in paths:"
+        "\n try: visible_now=__import__('os').path.exists(path)"
+        "\n except OSError: visible_now=False"
+        "\n if visible_now: visible.append(path)"
         "\n sock=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); sock.settimeout(2)"
         "\n try: sock.connect(path)"
         "\n except OSError as exc: errors.append(type(exc).__name__)"
         "\n else: print('reachable:' + path); sys.exit(0)"
         "\n finally: sock.close()"
-        "\nprint('blocked:' + ','.join(errors)); "
+        "\nif visible: print('visible-but-blocked:' + ','.join(visible) + ':' + ','.join(errors)); "
+        f"sys.exit({_SOCKET_VISIBLE_BLOCKED_EXIT})"
+        "\nprint('invisible:' + ','.join(errors)); "
         f"sys.exit({_CONNECTION_BLOCKED_EXIT})"
     )
 
@@ -109,6 +154,18 @@ def _tcp_source(port: int) -> str:
     )
 
 
+def _udp_route_source() -> str:
+    return (
+        "import socket,sys; "
+        "sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); sock.settimeout(2); "
+        "\ntry: sock.connect(('198.51.100.1', 9))"
+        "\nexcept OSError as exc: print('route-blocked:' + type(exc).__name__); "
+        f"sys.exit({_CONNECTION_BLOCKED_EXIT})"
+        "\nelse: print('route-present'); sys.exit(0)"
+        "\nfinally: sock.close()"
+    )
+
+
 def run_sandbox_probe(
     *,
     sandbox_mode: str = "auto",
@@ -120,12 +177,27 @@ def run_sandbox_probe(
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be greater than zero")
 
-    with tempfile.TemporaryDirectory(prefix="mca-sandbox-probe-") as raw_root:
+    temp_base = _verified_host_temp_base()
+    if temp_base is None:
+        return SandboxProbeReport(
+            backend=sandbox_mode,
+            checks=(
+                SandboxCheck(
+                    "outside_write",
+                    False,
+                    "host temp base /var/tmp is unavailable or not writable",
+                ),
+            ),
+        )
+
+    with tempfile.TemporaryDirectory(
+        prefix="mca-sandbox-probe-", dir=str(temp_base)
+    ) as raw_root:
         root = Path(raw_root).resolve()
         workspace = root / "workspace"
         protected = root / "protected.txt"
         workspace.mkdir(mode=0o700)
-        protected.write_text("protected\n", encoding="utf-8")
+        protected.write_text(_PROTECTED_CONTENT, encoding="utf-8")
         executor = BashExecutor(
             workspace,
             approval_mode="yolo",
@@ -160,68 +232,134 @@ def run_sandbox_probe(
         checks.append(
             SandboxCheck(
                 "workspace_write",
-                workspace_result.returncode == 0,
+                _returned(workspace_result, 0),
                 _result_detail(executor, workspace_result, "workspace write"),
             )
         )
 
-        outside_result = executor.execute_bash(
-            "printf 'tampered\\n' > ../protected.txt"
-        )
+        protected_command_path = shlex.quote(str(protected))
+        outside_results: list[tuple[Any, str]] = []
+        if backend == "docker":
+            visibility_result = executor.execute_bash(
+                f"test ! -e {protected_command_path}"
+            )
+            outside_results.append((visibility_result, "host sentinel invisibility"))
+            outside_result = executor.execute_bash(
+                "printf 'tampered\\n' > /mca-sandbox-probe-outside"
+            )
+            outside_results.append((outside_result, "read-only root write"))
+            outside_precondition = _returned(visibility_result, 0)
+            outside_denied = _ordinary_denial(outside_result)
+        else:
+            visibility_result = executor.execute_bash(
+                f"cat -- {protected_command_path}"
+            )
+            outside_results.append((visibility_result, "host sentinel read"))
+            outside_precondition = _returned(
+                visibility_result, 0
+            ) and visibility_result.output == _PROTECTED_CONTENT
+            if outside_precondition:
+                outside_result = executor.execute_bash(
+                    f"printf 'tampered\\n' > {protected_command_path}"
+                )
+                outside_results.append((outside_result, "host sentinel write"))
+                outside_denied = _ordinary_denial(outside_result)
+            else:
+                outside_denied = False
         try:
             protected_unchanged = (
-                protected.read_text(encoding="utf-8") == "protected\n"
+                protected.read_text(encoding="utf-8") == _PROTECTED_CONTENT
             )
         except (FileNotFoundError, OSError):
             protected_unchanged = False
-        outside_passed = outside_result.returncode != 0 and protected_unchanged
+        outside_passed = (
+            outside_precondition and outside_denied and protected_unchanged
+        )
         outside_summary = (
-            "outside write denied and protected file unchanged"
+            "outside boundary precondition passed, write denied, sentinel unchanged"
             if outside_passed
-            else "outside write was not safely denied"
+            else "outside boundary was not safely verified"
+        )
+        outside_detail = "; ".join(
+            _result_detail(executor, result, summary)
+            for result, summary in outside_results
         )
         checks.append(
             SandboxCheck(
                 "outside_write",
                 outside_passed,
-                _result_detail(executor, outside_result, outside_summary),
+                _redact(executor, f"{outside_summary}: {outside_detail}"),
             )
         )
 
-        unix_path = root / "host.sock"
-        unix_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            unix_listener.bind(str(unix_path))
-            unix_listener.listen(1)
-            unix_paths = [unix_path, *_known_unix_sockets()]
-            unix_result = executor.execute_bash(
-                _python_command(_unix_socket_source(unix_paths))
+            with tempfile.TemporaryDirectory(
+                prefix="mca-sandbox-probe-socket-", dir="/tmp"
+            ) as raw_socket_root:
+                unix_path = Path(raw_socket_root) / "host.sock"
+                unix_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    unix_listener.bind(str(unix_path))
+                    unix_listener.listen(1)
+                    unix_paths = [unix_path, *_known_unix_sockets()]
+                    unix_result = executor.execute_bash(
+                        _python_command(_unix_socket_source(unix_paths))
+                    )
+                finally:
+                    unix_listener.close()
+            unix_passed = _returned(
+                unix_result, _CONNECTION_BLOCKED_EXIT
+            ) or (
+                backend == "sandbox-exec"
+                and _returned(unix_result, _SOCKET_VISIBLE_BLOCKED_EXIT)
             )
-        finally:
-            unix_listener.close()
-        unix_passed = unix_result.returncode == _CONNECTION_BLOCKED_EXIT
+            unix_detail = _result_detail(
+                executor, unix_result, "Unix socket visibility and connection"
+            )
+        except OSError as exc:
+            unix_passed = False
+            unix_detail = _redact(
+                executor,
+                f"controlled Unix socket setup failed: {type(exc).__name__}: {exc}",
+            )
         checks.append(
             SandboxCheck(
                 "unix_socket",
                 unix_passed,
-                _result_detail(executor, unix_result, "Unix socket connection"),
+                unix_detail,
             )
         )
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp_listener:
-            tcp_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            tcp_listener.bind(("127.0.0.1", 0))
-            tcp_listener.listen(1)
-            port = int(tcp_listener.getsockname()[1])
-            network_result = executor.execute_bash(
-                _python_command(_tcp_source(port))
+        route_result = executor.execute_bash(_python_command(_udp_route_source()))
+        if _returned(route_result, _CONNECTION_BLOCKED_EXIT):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp_listener:
+                tcp_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                tcp_listener.bind(("127.0.0.1", 0))
+                tcp_listener.listen(1)
+                port = int(tcp_listener.getsockname()[1])
+                network_result = executor.execute_bash(
+                    _python_command(_tcp_source(port))
+                )
+            network_passed = _returned(
+                network_result, _CONNECTION_BLOCKED_EXIT
             )
-        network_passed = network_result.returncode == _CONNECTION_BLOCKED_EXIT
+            network_detail = _redact(
+                executor,
+                "; ".join(
+                    (
+                        _result_detail(executor, route_result, "UDP route"),
+                        _result_detail(executor, network_result, "controlled TCP"),
+                    )
+                ),
+            )
+        else:
+            network_passed = False
+            network_detail = _result_detail(executor, route_result, "UDP route")
         checks.append(
             SandboxCheck(
                 "network",
                 network_passed,
-                _result_detail(executor, network_result, "TCP connection"),
+                network_detail,
             )
         )
 

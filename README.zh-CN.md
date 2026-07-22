@@ -30,7 +30,7 @@ mca sandbox probe --sandbox auto
 
 `doctor` 只静态检查 sandbox 可执行文件是否在 PATH。`run` 和启用了编码能力的 `chat` 会话会在启动时执行权威后端启动检查；这里“启用编码能力”指启动时传入了 `--test-command`。未提供 `--test-command` 的纯 `/ask` 会话会跳过该检查，因为它不能运行测试、shell 或编码工具。`doctor` 只检查当前进程环境中是否存在 provider key，不会打印 key 值；对于私有 env 文件，它只检查元数据而不会打开文件。
 
-`mca sandbox probe` 会在不需要 provider key、也不接触目标仓库的前提下创建可丢弃数据，并验证所选后端能写入临时工作区，同时拒绝覆盖相邻文件、连接 Unix socket 和建立 TCP 连接。每项检查输出一行 `[PASS]` 或 `[FAIL]`；`--sandbox none` 会被拒绝，因为它不能证明隔离。该 probe 有超时边界，可用于验证本机配置，但即使全部通过也不代表任意不可信代码都是安全的。
+`mca sandbox probe` 会在不需要 provider key、也不接触目标仓库的前提下创建可丢弃数据，并检查工作区写入以及后端特定的外部写入、Unix socket 和网络边界。原生后端必须先精确读到宿主 sentinel，再拒绝修改它；Docker 必须看不到该 sentinel，并另外拒绝写入只读容器根目录。`bwrap` 与 Docker 必须隐藏受控及已知的宿主 Unix socket；`sandbox-exec` 可以看到路径，但连接必须被拒绝。网络检查先对 TEST-NET 地址尝试不发送数据包的 UDP `connect`，仅在进程无法取得或使用出站路由时继续要求受控 loopback TCP 连接被拒绝。每项检查输出一行 `[PASS]` 或 `[FAIL]`；`--sandbox none` 会被拒绝，因为它不能证明隔离。该 probe 有超时边界，可用于验证本机配置，但全部通过也只证明这些检查，并不代表任意不可信代码都是安全的。
 
 ## 安全与可靠性边界
 
@@ -326,7 +326,7 @@ Undo 原始恢复内容保存在状态根目录的私有 `undo/` 中，使用 `0
 - 原生 Windows：`0.3.x` 不支持完整的 Agent runtime；请在 WSL2/Linux 中使用上述隔离后端
 - 没有可用后端时，只有显式 `--sandbox none` 才允许不隔离执行
 
-可用 `mca sandbox probe --sandbox auto` 探测真实边界，也可显式指定 `sandbox-exec`、`bwrap` 或 `docker`。所有 Docker coding/test 镜像都必须提供 `/bin/sh`，probe 还额外需要 `python3`；普通编码运行仍可使用满足 `/bin/sh` 要求的其他预拉取自定义镜像。原生进程组清理无法证明 double-fork 后创建新 session 的进程已被回收；Bubblewrap 的 PID namespace 和 Docker 容器边界提供更强的后代进程收容，但所有后端都不是完整 OS/process containment 保证。
+可用 `mca sandbox probe --sandbox auto` 检查上述有限边界，也可显式指定 `sandbox-exec`、`bwrap` 或 `docker`。所有 Docker coding/test 镜像都必须提供 `/bin/sh`，probe 还额外需要 `python3`；普通编码运行仍可使用满足 `/bin/sh` 要求的其他预拉取自定义镜像。原生进程组清理无法证明 double-fork 后创建新 session 的进程已被回收；Bubblewrap 的 PID namespace 和 Docker 容器边界提供更强的后代进程收容，但所有后端都不是完整 OS/process containment 保证。
 
 沙箱、路径检查和脱敏都不是运行不可信仓库的绝对安全边界。不要让 Agent 在包含生产凭证、SSH 私钥或不应被模型读取的数据目录中运行。
 

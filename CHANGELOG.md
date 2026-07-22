@@ -8,7 +8,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Added
 
-- Added `mca sandbox probe`, a provider-free disposable capability check for workspace writes, denied sibling-file writes, denied Unix-socket connections, and denied TCP connections, plus dedicated real-backend CI that runs automatically on pushes and pull requests.
+- Added `mca sandbox probe`, a provider-free disposable capability check for workspace writes, backend-specific outside-write and Unix-socket boundaries, denial or unavailability of a usable outbound route, and denial of a controlled TCP connection, plus dedicated real-backend CI that runs automatically on pushes and pull requests.
 
 ### Changed
 
@@ -19,6 +19,7 @@ All notable changes to this project are documented in this file. The format foll
 ### Security
 
 - Added backend-specific boundary tests and documented that native process-group cleanup remains best effort: a double-fork can escape into a new session, and `sandbox-exec` does not provide PID-namespace, cgroup, or container-equivalent descendant containment.
+- Made probe results fail closed on negative executor returns, timeouts, exceptions, missing sentinel preconditions, and an unavailable verified host temp base.
 - A passing capability probe demonstrates only its bounded checks; it is not a guarantee that an arbitrary repository, command, dependency, image, daemon, kernel, or host is safe.
 
 ### Compatibility
