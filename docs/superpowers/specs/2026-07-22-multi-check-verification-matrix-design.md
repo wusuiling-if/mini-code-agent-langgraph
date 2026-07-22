@@ -2,8 +2,9 @@
 
 ## Goal
 
-Add a named verification matrix without weakening the project's central trust
-contract: every successful check must have observed the same fingerprinted
+Add a named verification matrix and close the equivalent legacy verification
+gap without weakening the project's central trust contract: every successful
+built-in authoritative check must begin and end on the same fingerprinted
 workspace state, and submission must remain bound to that exact state.
 
 This is the first of two independent changes. This specification covers only
@@ -48,8 +49,9 @@ Included:
 - repeatable named checks for `mca run` and `mca chat`;
 - strict same-fingerprint verification for matrices;
 - structured, redacted per-check evidence;
-- backward compatibility for the existing `--test-command` and single-command
-  executor path;
+- backward-compatible output and event shapes for a stable legacy
+  `--test-command`; a command that leaves a fingerprinted mutation now fails
+  closed;
 - deterministic unit, integration, architecture, resume, and CLI coverage;
 - user and security documentation.
 
@@ -163,14 +165,19 @@ one tool avoids ambiguous tool selection and preserves existing scripted and
 trajectory contracts.
 
 `ToolResult` gains an additive `verification_checks` collection containing
-redacted `VerificationCheckEvidence`. Existing fields remain present. The
-`ToolExecutor` protocol, `VerificationGate`, workspace fingerprint API, and
-checkpoint schema remain unchanged.
+redacted `VerificationCheckEvidence`, plus internal
+`verification_boundary_checked` and `verification_fingerprint` fields that are
+never serialized. Existing fields remain present. The `ToolExecutor` protocol,
+`VerificationGate`, workspace fingerprint API, and checkpoint schema remain
+unchanged.
 
-For the exact legacy configuration containing only `--test-command`, the
-existing single-command code path and top-level result fields remain
-compatible. A check configured through `--check`, or any configuration with
-multiple checks, uses strict matrix semantics.
+For the exact legacy configuration containing only `--test-command`, a stable
+command retains the existing single-command output and event shape, but it is
+wrapped in the same before/after fingerprint boundary. A command that leaves a
+fingerprinted mutation now fails with
+`WorkspaceChangedDuringVerification` instead of minting evidence for its
+post-mutation tree. A check configured through `--check`, or any configuration
+with multiple checks, additionally uses named matrix output and evidence.
 
 ## Execution and Fingerprint Data Flow
 
@@ -180,29 +187,43 @@ multiple checks, uses strict matrix semantics.
    is blocked, execute none of them.
 3. Present the complete ordered matrix for one confirmation. If confirmation
    is declined, execute none of it.
-4. Capture fingerprint `F0` immediately before the first check.
-5. Before each check, capture the workspace and require equality with `F0`.
+4. `execute_tool_batch` injects its trusted artifact-ignore paths into the
+   executor; model-supplied arguments are discarded and cannot influence them.
+5. Capture fingerprint `F0` immediately before the first check using those
+   same ignore paths.
+6. Before each check, capture the workspace and require equality with `F0`.
    This detects concurrent external changes between checks.
-6. Execute the check serially through the configured sandbox.
-7. Capture the workspace again and require equality with `F0` regardless of
+7. Execute the check serially through the configured sandbox.
+8. Capture the workspace again and require equality with `F0` regardless of
    the command return code.
-8. Record bounded, redacted evidence. Continue after an ordinary nonzero check
+9. Record bounded, redacted evidence. Continue after an ordinary nonzero check
    so the user receives the complete failure set.
-9. Stop immediately after a fingerprint change, fingerprint capture error,
+10. Stop immediately after a fingerprint change, fingerprint capture error,
    timeout, interruption, sandbox lifecycle error, policy error, or approval
    error. These failures make continued execution unsafe or misleading.
-10. Return aggregate success only when every configured check succeeded,
+11. Return aggregate success only when every configured check succeeded,
     recognized zero-test policy was satisfied, and every fingerprint comparison
     matched `F0`.
-11. `execute_tool_batch` captures the normal post-tool fingerprint. The existing
-    `VerificationGate.record_test()` binds aggregate success to it. Any later
-    edit, shell mutation, resume, or fingerprint error invalidates the evidence
-    exactly as it does today.
+12. `execute_tool_batch` captures the normal post-tool fingerprint with the
+    same ignore paths and requires a boundary-checked built-in result to carry
+    an internal `verification_fingerprint` equal to it before calling
+    `VerificationGate.record_test()`. Named matrix evidence is also treated as
+    requiring this attestation, so a missing flag cannot make matrix success
+    fail open. A missing fingerprint fails closed. This closes the
+    executor-to-gate handoff window. Any later edit, shell mutation, resume, or
+    fingerprint error invalidates the evidence exactly as it does today.
 
 The existing `WorkspaceFingerprinter` exclusions remain authoritative. A check
 may write ignored caches, but writing a fingerprinted generated file fails with
 `WorkspaceChangedDuringVerification`. Users must run generators before the
 verification matrix and then verify the resulting stable workspace.
+
+Fingerprint capture is a boundary check, not continuous filesystem mediation.
+It detects persisted changes before and after each check, including changes
+between checks, but cannot prove that a command did not modify and restore a
+file entirely between the two captures. The feature therefore does not claim
+immutable-snapshot execution. Enforcing that stronger property would require a
+separate copied/read-only workspace design and is outside this pull request.
 
 ## Result and Output Contract
 
@@ -220,8 +241,12 @@ output is not repeated unless needed for recognized test-count evidence.
 
 Structured evidence contains no raw command strings or full command output.
 The top-level command value uses a fixed marker for matrices rather than a
-joined command. Trajectories may store the additive evidence because it is
-redacted and bounded, but they never store the trusted matrix configuration.
+joined command. The runtime does not directly serialize trusted matrix
+configuration into trajectories. It may store bounded additive evidence and
+bounded command output after the existing best-effort redactor, but arbitrary
+output can echo command text or values that cannot be classified perfectly.
+Trajectories remain sensitive artifacts, and users must put additional values
+in the existing explicit redaction configuration.
 
 Aggregate behavior:
 
@@ -273,9 +298,10 @@ Executor and transaction coverage:
 - strict mutation detection before and after every check;
 - concurrent external mutation detection;
 - fingerprint capture failure, timeout, interruption, sandbox error, zero-test
-  result, output bounds, and secret redaction;
+  result, output bounds, and best-effort known/configured-secret redaction;
 - each command uses the selected sandbox and existing cleanup path;
-- exact legacy-only behavior remains compatible.
+- stable legacy-only output and event shapes remain compatible, while a
+  persisted mutation is newly rejected.
 
 Agent and lifecycle coverage:
 
@@ -316,16 +342,21 @@ Update `README.md`, `README.zh-CN.md`, `SECURITY.md`, CLI help, and
 - `--check NAME COMMAND` works in run and chat with zero new dependencies.
 - A matrix cannot begin until every command passes preflight and one approval is
   granted.
-- Every successful check is proven to have observed the same fingerprint `F0`.
-- Any fingerprinted mutation during a matrix blocks verification with a stable,
-  test-covered error.
+- Every successful built-in authoritative check begins and ends with the same
+  fingerprint `F0`.
+- Any fingerprinted mutation that persists to a boundary capture during a
+  matrix blocks verification with a stable, test-covered error.
 - All configured checks must pass before submission; later changes invalidate
   the aggregate.
-- Raw matrix commands, unbounded outputs, secrets, and trusted matrix
-  configuration do not enter structured trajectory evidence. The legacy-only
-  event shape remains unchanged.
-- `--test-command` by itself remains backward-compatible; existing scripted
-  benchmark contracts remain unchanged.
+- The runtime does not directly serialize raw matrix command configuration or
+  unbounded outputs into structured trajectory evidence. Bounded command
+  output can still echo arbitrary text; it receives existing best-effort
+  known/configured-secret redaction, and documentation still treats trajectory
+  files as sensitive. The stable legacy-only event shape remains unchanged.
+- Aggregate success cannot be bound with a missing or different post-tool
+  fingerprint at the executor-to-gate handoff.
+- A stable `--test-command` remains surface-compatible; a persisted mutation
+  fails closed, and existing scripted benchmark contracts remain unchanged.
 - The complete local and remote verification matrix passes before the feature
   is described as complete.
 
