@@ -35,7 +35,8 @@ class SandboxProbeReport:
 
 
 def _redact(executor: Any, detail: str) -> str:
-    return executor.redactor.redact_text(truncate_text(detail, _DETAIL_LIMIT))
+    redacted = executor.redactor.redact_text(detail)
+    return truncate_text(redacted, _DETAIL_LIMIT)[:_DETAIL_LIMIT]
 
 
 def _result_detail(executor: Any, result: Any, summary: str) -> str:
@@ -187,21 +188,17 @@ def run_sandbox_probe(
             )
         )
 
-        unix_listener: socket.socket | None = None
-        unix_paths = _known_unix_sockets()
+        unix_path = root / "host.sock"
+        unix_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            if not unix_paths:
-                unix_path = root / "host.sock"
-                unix_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                unix_listener.bind(str(unix_path))
-                unix_listener.listen(1)
-                unix_paths = [unix_path]
+            unix_listener.bind(str(unix_path))
+            unix_listener.listen(1)
+            unix_paths = [unix_path, *_known_unix_sockets()]
             unix_result = executor.execute_bash(
                 _python_command(_unix_socket_source(unix_paths))
             )
         finally:
-            if unix_listener is not None:
-                unix_listener.close()
+            unix_listener.close()
         unix_passed = unix_result.returncode == _CONNECTION_BLOCKED_EXIT
         checks.append(
             SandboxCheck(

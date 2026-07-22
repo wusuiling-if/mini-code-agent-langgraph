@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import ast
+import shlex
+import socket
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +21,21 @@ from mini_code_agent.sandbox_probe import (
 class _Redactor:
     def redact_text(self, text: str) -> str:
         return text.replace("sensitive", "[REDACTED]")
+
+
+class _ExpandingRedactor:
+    def __init__(self, secret: str):
+        self.secret = secret
+        self.seen: list[str] = []
+
+    def redact_text(self, text: str) -> str:
+        self.seen.append(text)
+        return text.replace(self.secret, "[REDACTED-LONG-VALUE]")
+
+
+class _ExecutorWithRedactor:
+    def __init__(self, redactor: object):
+        self.redactor = redactor
 
 
 @dataclass
@@ -56,6 +76,30 @@ class _FakeOutsideWriteSucceeds(_FakeExecutor):
                 ToolResult("bash", "network denied", 73, 0),
             )
         )
+
+
+class _FakeExecutorInspectingUnixListener(_FakeExecutor):
+    controlled_listener_was_live = False
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self._command_count = 0
+
+    def execute_bash(self, command: str) -> ToolResult:
+        self._command_count += 1
+        if self._command_count == 3:
+            source = shlex.split(command)[2]
+            paths_source = source.split("paths=", 1)[1].split("; errors=", 1)[0]
+            paths = [Path(path) for path in ast.literal_eval(paths_source)]
+            controlled_paths = [
+                path for path in paths if path.name == "host.sock"
+            ]
+            if controlled_paths:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.settimeout(1)
+                    client.connect(str(controlled_paths[0]))
+                type(self).controlled_listener_was_live = True
+        return super().execute_bash(command)
 
 
 def test_probe_rejects_none():
@@ -103,3 +147,36 @@ def test_outside_write_requires_command_failure_even_when_file_is_unchanged(
     )
     assert outside_write.passed is False
     assert report.ok is False
+
+
+def test_unix_check_uses_live_controlled_listener_when_known_socket_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw_root:
+        stale_path = Path(raw_root) / "stale.sock"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stale_socket:
+            stale_socket.bind(str(stale_path))
+        _FakeExecutorInspectingUnixListener.controlled_listener_was_live = False
+        monkeypatch.setattr(
+            probe_module, "BashExecutor", _FakeExecutorInspectingUnixListener
+        )
+        monkeypatch.setattr(
+            probe_module, "_known_unix_sockets", lambda: [stale_path]
+        )
+
+        report = run_sandbox_probe(sandbox_mode="docker")
+
+        assert report.ok is True
+        assert _FakeExecutorInspectingUnixListener.controlled_listener_was_live is True
+
+
+def test_detail_is_fully_redacted_before_final_length_limit():
+    secret = "repeated-sensitive-token"
+    raw_detail = (f"prefix:{secret}:suffix\n" * 100).strip()
+    redactor = _ExpandingRedactor(secret)
+
+    detail = probe_module._redact(_ExecutorWithRedactor(redactor), raw_detail)
+
+    assert redactor.seen == [raw_detail]
+    assert secret not in detail
+    assert len(detail) <= 500
