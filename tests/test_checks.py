@@ -11,6 +11,7 @@ from mini_code_agent.checks import (
     run_verification_matrix,
 )
 from mini_code_agent.contracts import ToolResult
+from mini_code_agent.utils import DEFAULT_OUTPUT_LIMIT
 
 
 def test_normalize_verification_checks_preserves_legacy_first_and_explicit_order():
@@ -197,3 +198,127 @@ def test_matrix_stops_on_infrastructure_error_but_not_zero_tests():
 
     assert calls == ["tests", "lint"]
     assert result.exception_info == "TimeoutExpired"
+
+
+def test_matrix_stops_on_blocked_evidence_and_preserves_approval_contract():
+    checks = (
+        VerificationCheck("tests", "pytest -q"),
+        VerificationCheck("lint", "ruff check ."),
+    )
+    calls: list[str] = []
+
+    def execute(check: VerificationCheck) -> VerificationCheckExecution:
+        calls.append(check.name)
+        return VerificationCheckExecution(
+            evidence=VerificationCheckEvidence(
+                name=check.name,
+                returncode=-1,
+                duration_ms=1,
+                exception_info="BlockedByPolicy",
+                blocked=True,
+            )
+        )
+
+    result = run_verification_matrix(
+        checks,
+        capture_fingerprint=lambda: "stable",
+        execute_check=execute,
+    )
+
+    assert calls == ["tests"]
+    assert result.returncode == -1
+    assert result.exception_info == "BlockedByPolicy"
+    assert result.blocked is True
+    assert result.approved is True
+
+
+def test_matrix_stops_on_rejected_evidence_with_approval_false():
+    checks = (
+        VerificationCheck("tests", "pytest -q"),
+        VerificationCheck("lint", "ruff check ."),
+    )
+    calls: list[str] = []
+
+    def execute(check: VerificationCheck) -> VerificationCheckExecution:
+        calls.append(check.name)
+        return VerificationCheckExecution(
+            evidence=VerificationCheckEvidence(
+                name=check.name,
+                returncode=-1,
+                duration_ms=1,
+                exception_info="UserRejected",
+                approved=False,
+            )
+        )
+
+    result = run_verification_matrix(
+        checks,
+        capture_fingerprint=lambda: "stable",
+        execute_check=execute,
+    )
+
+    assert calls == ["tests"]
+    assert result.returncode == -1
+    assert result.exception_info == "UserRejected"
+    assert result.blocked is False
+    assert result.approved is False
+
+
+def test_matrix_converts_execute_check_exception_to_safe_failure():
+    check = VerificationCheck("tests", "pytest -q")
+
+    def execute(_: VerificationCheck) -> VerificationCheckExecution:
+        raise RuntimeError("private executor detail")
+
+    result = run_verification_matrix(
+        (check,),
+        capture_fingerprint=lambda: "stable",
+        execute_check=execute,
+    )
+
+    assert result.returncode == -1
+    assert result.exception_info == "VerificationCheckExecutionError"
+    assert result.verification_checks == ()
+    assert "private executor detail" not in result.output
+
+
+def test_matrix_prioritizes_workspace_mutation_over_ordinary_check_failure():
+    check = VerificationCheck("tests", "pytest -q")
+    fingerprints = iter(("before", "before", "after"))
+
+    result = run_verification_matrix(
+        (check,),
+        capture_fingerprint=lambda: next(fingerprints),
+        execute_check=lambda item: _execution(item, returncode=1),
+    )
+
+    assert result.returncode == -1
+    assert result.exception_info == "WorkspaceChangedDuringVerification"
+    assert [item.returncode for item in result.verification_checks] == [1]
+
+
+def test_matrix_rendering_bounds_large_failing_check_output():
+    checks = tuple(
+        VerificationCheck(f"check-{index}", "false") for index in range(8)
+    )
+    large_output = "A" * 1_500 + "MIDDLE" * 200 + "B" * 1_500
+
+    result = run_verification_matrix(
+        checks,
+        capture_fingerprint=lambda: "stable",
+        execute_check=lambda check: VerificationCheckExecution(
+            evidence=VerificationCheckEvidence(
+                name=check.name,
+                returncode=1,
+                duration_ms=1,
+            ),
+            output=large_output,
+        ),
+    )
+
+    marker = "...[elided "
+    assert marker in result.output
+    assert "## check-0" in result.output
+    assert "## check-7" in result.output
+    assert result.output.startswith("CHECK  STATUS  EXIT  DURATION")
+    assert len(result.output) <= DEFAULT_OUTPUT_LIMIT + 64

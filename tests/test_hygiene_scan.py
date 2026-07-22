@@ -75,3 +75,18 @@ def test_scan_patterns_do_not_flag_the_scanner_source_itself():
     )
 
     assert scanner.scan_added_diff(source_diff) == {}
+
+
+def test_current_docs_describe_legacy_and_named_verification_configuration():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+
+    assert "the selected test command must pass" not in readme
+    assert "A user-selected authoritative test must pass" not in readme
+    assert "`--test-command` or named `--check`" in readme
+    assert "如果启动时不传 `--test-command`，该会话只能使用" not in readme_zh
+    assert "不传 `--test-command` 或 `--check`" in readme_zh
+    assert "provider, test command, sandbox" not in security
+    assert "configured test command is an authoritative check" not in security
+    assert "legacy `--test-command` or named `--check`" in security

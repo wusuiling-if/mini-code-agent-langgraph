@@ -12,7 +12,7 @@
 
 ![`mca demo` fixes a calculator bug, verifies the tests, and submits the patch](https://raw.githubusercontent.com/wusuiling-if/mini-code-agent-langgraph/main/docs/assets/demo.gif)
 
-- **Verification-bound submission:** the selected test command must pass against the current workspace fingerprint before the agent can submit.
+- **Verification-bound submission:** user-configured verification—legacy `--test-command` or named `--check` entries—must pass against the current workspace fingerprint before the agent can submit.
 - **Inspectable recovery:** redacted trajectories persist each run and can resume safely after an interruption.
 - **Conflict-aware Undo:** a private HMAC-authenticated journal rejects post-edit conflicts by default.
 
@@ -79,7 +79,7 @@ mca undo /path/to/run.traj.json --dry-run
 
 - New runs and chats reject dirty Git worktrees by default; arbitrary shell access is disabled by default.
 - Structured file operations are confined to the resolved workspace, and `/ask` has a runtime read-only allowlist.
-- A user-selected authoritative test must pass against the current workspace fingerprint before submission. A recognized zero-test result is rejected by default, and resume invalidates earlier verification.
+- User-configured authoritative verification—legacy `--test-command` or named `--check` entries—must pass against the current workspace fingerprint before submission. A recognized zero-test result is rejected by default, and resume invalidates earlier verification.
 - Undo uses a private, HMAC-authenticated journal and rejects post-edit conflicts unless explicitly forced.
 - `--allow-zero-tests` explicitly weakens verification by allowing a recognized zero-test result to satisfy the gate. `--sandbox none`, `--allow-shell`, `--allow-dirty`, `--yes`, and force/legacy Undo options also deliberately weaken protections; `--sandbox auto` fails closed if no usable backend is found.
 - Native Windows supports informational CLI and configuration paths only. Run the full agent, structured tools, and `mca demo` from macOS, Linux, or WSL2. macOS uses `sandbox-exec`; Linux uses `bwrap` or Docker when available.

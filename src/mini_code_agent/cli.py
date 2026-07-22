@@ -328,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         nargs=2,
         metavar=("NAME", "COMMAND"),
-        default=[],
+        default=None,
         help="Add a named authoritative verification check; repeatable.",
     )
     run.add_argument(
@@ -394,7 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         nargs=2,
         metavar=("NAME", "COMMAND"),
-        default=[],
+        default=None,
         help="Add a named authoritative verification check; repeatable.",
     )
     chat.add_argument(

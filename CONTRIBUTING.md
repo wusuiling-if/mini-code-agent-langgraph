@@ -84,7 +84,7 @@ Read [SECURITY.md](SECURITY.md) before changing a security boundary. Pull reques
 - shell/test execution, trusted executable discovery, subprocess environment, timeout, signal handling, process-tree cleanup, or Docker cleanup;
 - sandbox probing, platform selection, or fail-closed fallback behavior;
 - `/ask` and `/code` authorization, approvals, tool availability, or tool-call batching;
-- workspace fingerprints, verification invalidation, submit gating, or authoritative test execution;
+- workspace fingerprints, verification invalidation, submit gating, or authoritative verification execution;
 - checkpoint/resume validation, trajectory size limits, redaction, state paths, HMAC keys, or conflict-aware Undo;
 - provider selection, request payloads, reasoning round trips, and API-key handling.
 

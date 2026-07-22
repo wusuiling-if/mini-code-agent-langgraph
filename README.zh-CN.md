@@ -247,7 +247,7 @@ mca chat \
   --test-command "python3 -m pytest"
 ```
 
-会话默认进入 `/ask`：允许列目录、搜索、读文件和查看 diff，但运行 shell、测试或写文件会被 runtime 强制阻止，而不只是依赖提示词。如果启动时不传 `--test-command`，该会话只能使用 `/ask`，`/code` 会被阻止；所有编码会话都应显式配置权威测试命令。
+会话默认进入 `/ask`：允许列目录、搜索、读文件和查看 diff，但运行 shell、测试或写文件会被 runtime 强制阻止，而不只是依赖提示词。如果启动时不传 `--test-command` 或 `--check`，该会话只能使用 `/ask`，`/code` 会被阻止；所有编码会话都应显式配置权威验证：使用旧版 `--test-command`，或使用命名的 `--check`。
 
 ```text
 /ask              切换到只读聊天
@@ -321,7 +321,7 @@ Undo 原始恢复内容保存在状态根目录的私有 `undo/` 中，使用 `0
 | `write_file` | 写入文件 |
 | `apply_patch` | 精确文本替换 |
 | `replace_lines` | 按行替换 |
-| `run_tests` | 运行用户配置的验证命令 |
+| `run_tests` | 运行用户配置的验证矩阵 |
 | `git_diff` | 查看变更 |
 | `submit` | 结束任务 |
 | `bash` | 任意 shell 逃生口，默认禁用 |
@@ -330,12 +330,12 @@ Undo 原始恢复内容保存在状态根目录的私有 `undo/` 中，使用 `0
 
 - `--cwd` 必须是目录，文件工具限制在其真实路径范围内
 - 新建 run/chat 时 dirty Git 工作区默认拒绝启动；`--allow-dirty` 会关闭这项保护，resume 前也必须自行检查并暂存额外改动
-- shell 默认关闭，测试命令和子进程使用收敛后的环境
+- shell 默认关闭，验证命令和子进程使用收敛后的环境
 - shell/test 子进程在超时、Ctrl-C、SIGTERM 和异常后回收整个进程组；Docker 运行使用唯一 name/cidfile 并在退出时强制清理
 - `mca run` 即使没有检测到文件变化，也必须至少通过一次用户配置的权威验证才能提交
 - `mca run` 要求显式传入 `--model` 和 `--test-command` 或命名 `--check`，并拒绝 `--model mock`；无 Key 的确定性流程请使用 `mca demo`
 - 工作区指纹覆盖内容、文件类型、权限位、symlink target、依赖目录及 Git 本地配置/hooks；缓存目录和易变 Git 数据库除外
-- 模型不能覆盖 `--test-command`；失败的权威测试、改变工作区指纹的后续操作以及 resume 会使旧验证失效
+- 模型不能覆盖旧版 `--test-command` 或命名的 `--check`；失败的权威验证、改变工作区指纹的后续操作以及 resume 会使旧验证失效
 - 权威命令被识别为 0 个测试时默认不能通过验证；`--allow-zero-tests` 会允许它通过，是需要用户明确接受的验证弱化
 - `/ask` 使用只读工具允许列表；未来新增工具不会被默认放行
 - 工具输出、搜索、结构化编辑、tool-call 数量、持久对话和 `reasoning_content` 都有资源上限；状态文件读写共享 256 MiB 硬上限，可用 `--context-chars` 调整上下文预算

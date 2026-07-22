@@ -146,6 +146,38 @@ def test_parser_accepts_named_checks_and_preserves_order():
     assert explicit == combined
 
 
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["run", "task", "--model", "deepseek"], []),
+        (["chat"], []),
+        (
+            [
+                "chat",
+                "--check",
+                "tests",
+                "pytest -q",
+                "--check",
+                "lint",
+                "ruff check .",
+            ],
+            [("tests", "pytest -q"), ("lint", "ruff check .")],
+        ),
+    ],
+)
+def test_cli_omitted_and_repeated_checks_keep_the_same_configuration_contract(
+    argv: list[str], expected: list[tuple[str, str]]
+):
+    args = cli_module.build_parser().parse_args(argv)
+
+    combined, explicit = cli_module._configured_verification_checks(
+        args, required=False
+    )
+
+    assert [(item.name, item.command) for item in combined] == expected
+    assert [(item.name, item.command) for item in explicit] == expected
+
+
 def test_cli_combines_legacy_test_first_and_rejects_duplicate_tests():
     parser = cli_module.build_parser()
     args = parser.parse_args(

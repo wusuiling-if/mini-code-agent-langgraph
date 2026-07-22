@@ -50,8 +50,8 @@ Never include a real API key, access token, private repository content, or an un
 ### Trust assumptions
 
 - the local operating-system account, Python interpreter, installed dependencies, and selected container runtime are trusted;
-- the user deliberately selects the workspace, provider, test command, sandbox, and high-risk flags;
-- the configured test command is an authoritative check chosen by the user;
+- the user deliberately selects the workspace, provider, legacy `--test-command` or named `--check` verification, sandbox, and high-risk flags;
+- the configured legacy `--test-command` or named `--check` verification is an authoritative check chosen by the user;
 - source sent to the selected model provider is permitted to leave the machine under that provider's terms;
 - Docker isolation relies on a trusted Docker daemon, image, host kernel, and configuration.
 
