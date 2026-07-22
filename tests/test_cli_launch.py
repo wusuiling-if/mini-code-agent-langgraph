@@ -44,6 +44,52 @@ def test_build_parser_does_not_import_heavy_runtime():
     assert modules.isdisjoint(HEAVY_MODULES)
 
 
+def test_parser_accepts_nested_sandbox_probe():
+    args = cli_module.build_parser().parse_args(
+        ["sandbox", "probe", "--sandbox", "docker"]
+    )
+
+    assert args.command == "sandbox"
+    assert args.sandbox_command == "probe"
+    assert args.sandbox == "docker"
+
+
+def test_parser_rejects_none_for_sandbox_probe():
+    with pytest.raises(SystemExit):
+        cli_module.build_parser().parse_args(
+            ["sandbox", "probe", "--sandbox", "none"]
+        )
+
+
+def test_sandbox_probe_command_renders_checks_and_failure_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    import mini_code_agent.sandbox_probe as probe_module
+    from mini_code_agent.sandbox_probe import SandboxCheck, SandboxProbeReport
+
+    monkeypatch.setattr(
+        probe_module,
+        "run_sandbox_probe",
+        lambda **_kwargs: SandboxProbeReport(
+            backend="fake",
+            checks=(
+                SandboxCheck("workspace_write", True, "allowed"),
+                SandboxCheck("network", False, "reachable"),
+            ),
+        ),
+    )
+    args = cli_module.build_parser().parse_args(["sandbox", "probe"])
+
+    result = cli_module.sandbox_probe_command(args)
+
+    assert result == 1
+    assert capsys.readouterr().out.splitlines() == [
+        "[PASS] workspace_write: allowed",
+        "[FAIL] network: reachable",
+    ]
+
+
 def test_help_does_not_import_agent_runtime():
     modules = _imported_modules(
         "import sys\n"

@@ -405,6 +405,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run a deterministic no-key coding demo in a temporary workspace.",
     )
 
+    sandbox = subparsers.add_parser(
+        "sandbox", help="Inspect command isolation capabilities."
+    )
+    sandbox_commands = sandbox.add_subparsers(
+        dest="sandbox_command", required=True
+    )
+    probe = sandbox_commands.add_parser(
+        "probe", help="Run disposable isolation checks."
+    )
+    probe.add_argument(
+        "--sandbox",
+        choices=["auto", "sandbox-exec", "bwrap", "docker"],
+        default="auto",
+    )
+    probe.add_argument("--docker-image", default=None)
+    probe.add_argument("--timeout", type=_positive_int, default=10)
+
     doctor = subparsers.add_parser(
         "doctor",
         help="Inspect local prerequisites without reading secret values.",
@@ -615,6 +632,8 @@ def main() -> None:
             raise SystemExit(init_command(args))
         if args.command == "demo":
             raise SystemExit(demo_command(args))
+        if args.command == "sandbox" and args.sandbox_command == "probe":
+            raise SystemExit(sandbox_probe_command(args))
         if args.command == "doctor":
             raise SystemExit(doctor_command(args))
         parser.print_help()
@@ -808,6 +827,21 @@ def doctor_command(args: argparse.Namespace) -> int:
         f"pass={counts['pass']} warn={counts['warn']} fail={counts['fail']}"
     )
     return 1 if counts["fail"] else 0
+
+
+def sandbox_probe_command(args: argparse.Namespace) -> int:
+    from mini_code_agent.sandbox_probe import run_sandbox_probe
+
+    report = run_sandbox_probe(
+        sandbox_mode=args.sandbox,
+        docker_image=args.docker_image
+        or os.getenv("MCA_DOCKER_IMAGE", "python:3.11-slim"),
+        timeout_seconds=args.timeout,
+    )
+    for check in report.checks:
+        status = "PASS" if check.passed else "FAIL"
+        print(f"[{status}] {check.name}: {check.detail}")
+    return 0 if report.ok else 1
 
 
 def _git_dirty(cwd: Path) -> bool:
