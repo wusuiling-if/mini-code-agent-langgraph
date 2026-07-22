@@ -72,6 +72,19 @@ def test_macos_profile_does_not_allow_shared_tmp_writes(tmp_path: Path) -> None:
     assert '(allow file-write* (subpath "/private/tmp"))' not in profile
 
 
+def test_macos_sandbox_allows_private_runtime_tmp_writes(tmp_path: Path) -> None:
+    executor = BashExecutor(tmp_path, sandbox_mode="sandbox-exec")
+    if not executor._trusted_executable("sandbox-exec"):
+        pytest.skip("sandbox-exec is unavailable")
+
+    result = executor._run_argv(
+        ["/bin/sh", "-c", 'printf ok > "$TMPDIR/sandbox-write"']
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert (executor._runtime_root / "tmp" / "sandbox-write").read_text() == "ok"
+
+
 def test_verification_fingerprint_covers_modes_symlinks_and_dependency_dirs(
     tmp_path: Path,
 ):

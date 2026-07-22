@@ -1039,7 +1039,7 @@ class BashExecutor:
 
         home = literal(Path.home().resolve())
         cwd = literal(self.cwd)
-        runtime = literal(self._runtime_root)
+        runtime = literal(self._runtime_root.resolve())
         # Default read access is retained for macOS frameworks and package
         # managers, but the real home directory is hidden except for the target
         # workspace.  HOME itself points at the isolated runtime directory.
