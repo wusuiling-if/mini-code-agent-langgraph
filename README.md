@@ -30,7 +30,7 @@ mca doctor --cwd /path/to/repo --sandbox auto --provider auto
 mca sandbox probe --sandbox auto
 ```
 
-`doctor` performs static prerequisite checks. `run` and coding-enabled `chat` sessions perform the authoritative backend startup check; a coding-enabled chat is one started with `--test-command`. An `/ask`-only chat started without `--test-command` skips that check because it cannot run tests, shell commands, or coding tools. Doctor checks whether a provider key is present in the current process environment without printing its value, and inspects private env-file metadata without opening the file.
+`doctor` performs static prerequisite checks. `run` and coding-enabled `chat` sessions perform the authoritative backend startup check; a coding-enabled chat is one started with `--test-command` or `--check`. An `/ask`-only chat started without either skips that check because it cannot run tests, shell commands, or coding tools. Doctor checks whether a provider key is present in the current process environment without printing its value, and inspects private env-file metadata without opening the file.
 
 `mca sandbox probe` goes further: without a provider key or target repository, it creates disposable data and checks a workspace write plus backend-specific outside-write, Unix-socket, and network boundaries. Native backends must read an exact host sentinel and return the probe's reserved evidence code only when mutation is blocked by `EPERM`, `EACCES`, or `EROFS`; Docker must not see that sentinel and must separately report the `ST_RDONLY` mount flag for `/`. Other positive exits, launch failures, exceptions, and timeouts are failures rather than denial evidence. `bwrap` and Docker must hide the controlled and known host Unix sockets, while `sandbox-exec` may expose a path only if connection remains denied. The network check first attempts a no-packet UDP `connect` to a TEST-NET address and, only when the process cannot obtain or use an outbound route, requires denial of a controlled loopback TCP connection. It prints one `[PASS]` or `[FAIL]` result per check and rejects `--sandbox none`, which cannot demonstrate isolation. The probe itself is bounded and useful for validating a local setup, but a passing result is evidence only for these checks, not proof that arbitrary untrusted code is safe.
 
@@ -44,7 +44,29 @@ mca run "Fix the failing tests" --cwd /path/to/repo --model deepseek --provider 
 mca chat --cwd /path/to/repo --model deepseek --provider deepseek --test-command "python3 -m pytest -q"
 ```
 
-`mca run` is a one-shot coding run and requires both an explicit `--model` and an explicit authoritative `--test-command`; it rejects `--model mock`, so use `mca demo` for the deterministic no-key flow. `mca chat` is a persistent REPL that starts in read-only `/ask` mode. A chat started without `--test-command` remains `/ask`-only and blocks `/code`; supply the flag, then enter `/code`, to explicitly allow coding tools. `--yes` skips confirmations but never grants `/code` mode by itself.
+`mca run` is a one-shot coding run and requires both an explicit `--model` and authoritative verification configured with `--test-command` or `--check`; it rejects `--model mock`, so use `mca demo` for the deterministic no-key flow. `mca chat` is a persistent REPL that starts in read-only `/ask` mode. A chat started without either verification form remains `/ask`-only and blocks `/code`; supply one, then enter `/code`, to explicitly allow coding tools. `--yes` skips confirmations but never grants `/code` mode by itself.
+
+For a named verification matrix, configure the checks in the order they must run:
+
+```bash
+mca run "Fix the issue" \
+  --model deepseek \
+  --check tests "pytest -q" \
+  --check lint "ruff check ." \
+  --check types "pyright"
+```
+
+Named checks run serially and must all begin and end with one unchanged workspace fingerprint. A check that leaves a fingerprinted file changed invalidates the entire matrix with WorkspaceChangedDuringVerification; run generators before the matrix. Ignored cache paths retain the existing fingerprint policy.
+
+`--test-command` remains the backward-compatible single-check form. Configure at most 16 checks. Worst-case matrix time is approximately the number of checks multiplied by the per-command timeout.
+
+Stable `--test-command` output and event fields remain compatible, but the single legacy command now also fails closed if it leaves a fingerprinted file changed. Use ignored cache paths only through the existing trusted runtime artifact policy.
+
+This evidence shows that the configured commands passed under the runtime policy for one workspace state. It does not prove test completeness, code correctness, model quality, or overall system safety.
+
+Fingerprint capture occurs at check boundaries. It detects persisted changes but cannot prove that a command did not modify and restore a file entirely between captures; this feature does not claim immutable-snapshot execution.
+
+Matrix configuration commands are not directly serialized into structured evidence and output is bounded. Redaction is best effort for known patterns, environment values, and values configured through the existing redaction controls; arbitrary command output can echo command text or values that cannot be classified perfectly. Treat trajectory files as sensitive and do not publish them without review.
 
 Runs and chats save a trajectory. Inspect it or preview a conflict-aware undo before changing files:
 

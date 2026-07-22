@@ -28,7 +28,7 @@ mca sandbox probe --sandbox auto
 
 这条无 Key 诊断会把 provider 记为 warning 而不是失败。`mca demo` 当前支持 macOS、Linux 与 WSL2；原生 Windows 请使用 WSL2/Linux 环境运行完整 Agent。
 
-`doctor` 只静态检查 sandbox 可执行文件是否在 PATH。`run` 和启用了编码能力的 `chat` 会话会在启动时执行权威后端启动检查；这里“启用编码能力”指启动时传入了 `--test-command`。未提供 `--test-command` 的纯 `/ask` 会话会跳过该检查，因为它不能运行测试、shell 或编码工具。`doctor` 只检查当前进程环境中是否存在 provider key，不会打印 key 值；对于私有 env 文件，它只检查元数据而不会打开文件。
+`doctor` 只静态检查 sandbox 可执行文件是否在 PATH。`run` 和启用了编码能力的 `chat` 会话会在启动时执行权威后端启动检查；这里“启用编码能力”指启动时传入了 `--test-command` 或 `--check`。未提供这两种验证形式的纯 `/ask` 会话会跳过该检查，因为它不能运行测试、shell 或编码工具。`doctor` 只检查当前进程环境中是否存在 provider key，不会打印 key 值；对于私有 env 文件，它只检查元数据而不会打开文件。
 
 `mca sandbox probe` 会在不需要 provider key、也不接触目标仓库的前提下创建可丢弃数据，并检查工作区写入以及后端特定的外部写入、Unix socket 和网络边界。原生后端必须先精确读到宿主 sentinel，并且只有修改被 `EPERM`、`EACCES` 或 `EROFS` 阻止时才返回 probe 保留的证据退出码；Docker 必须看不到该 sentinel，并另外报告 `/` 挂载的 `ST_RDONLY` 标志。其他正数退出码、启动失败、异常和超时均视为失败，而不是拒绝证据。`bwrap` 与 Docker 必须隐藏受控及已知的宿主 Unix socket；`sandbox-exec` 可以看到路径，但连接必须被拒绝。网络检查先对 TEST-NET 地址尝试不发送数据包的 UDP `connect`，仅在进程无法取得或使用出站路由时继续要求受控 loopback TCP 连接被拒绝。每项检查输出一行 `[PASS]` 或 `[FAIL]`；`--sandbox none` 会被拒绝，因为它不能证明隔离。该 probe 有超时边界，可用于验证本机配置，但全部通过也只证明这些检查，并不代表任意不可信代码都是安全的。
 
@@ -37,7 +37,7 @@ mca sandbox probe --sandbox auto
 | 控制 | Runtime 强制行为 | 边界 |
 | --- | --- | --- |
 | 只读聊天 | `/ask` 只允许列目录、搜索、读文件和查看 diff；新增工具不会自动获得权限 | `/code` 是用户显式授予的编码能力，不代表模型输出一定正确 |
-| 验证门 | 修改后只有当前工作区指纹对应的权威测试通过，才允许 `submit`；识别到 0 个测试时默认拒绝 | 测试命令和测试覆盖率由用户负责配置；`--allow-zero-tests` 会显式削弱该门禁 |
+| 验证门 | 修改后只有当前工作区指纹对应的权威验证通过，才允许 `submit`；识别到 0 个测试时默认拒绝 | 验证命令和测试覆盖率由用户负责配置；`--allow-zero-tests` 会显式削弱该门禁 |
 | 崩溃恢复 | run/chat 从完整工具边界恢复，并使恢复前的验证结果失效 | 被强制终止的外部命令可能已经产生部分副作用 |
 | HMAC 认证撤销 | 私有 Undo journal 以 HMAC 绑定轨迹、工作区、路径和内容 hash，并在覆盖前检查冲突 | HMAC 校验可检测本机 journal 是否被篡改，不证明修改在语义上安全 |
 | Fail-closed 隔离 | `auto` 实际探测后端；没有可用后端时拒绝执行命令，除非用户显式选择 `none` | macOS 使用 `sandbox-exec`，Linux 使用 `bwrap` 或 Docker；原生 Windows 的完整 Agent runtime 尚不支持 |
@@ -70,7 +70,7 @@ mca sandbox probe --sandbox auto
 - 真实 `run` / `chat` 需要 DeepSeek 或 OpenAI API Key；确定性的 `mca demo` 不需要 Key
 - 明确可用的隔离后端：macOS `sandbox-exec`、Linux `bwrap` 或 Docker；如果显式使用 `--sandbox none`，只应指向无凭证、可丢弃的可信目录
 - 原生 Windows 仅验证 `help`、`version`、`doctor` 和配置路径；`run`、`chat`、`demo` 及结构化文件工具请在 WSL2/Linux 中运行
-- 一个由用户预先配置的权威测试命令，例如 `python3 -m pytest -q`
+- 用户预先配置的权威验证：单个 `--test-command`，或按顺序列出的命名 `--check`
 - 可写的用户状态目录；默认目录和权限见“运行状态与轨迹”
 
 `git` 不是非 Git 项目的硬依赖，但 Git 仓库中的 dirty 检查和 diff 需要系统可信路径里的 `git`。
@@ -116,6 +116,30 @@ mca demo
 ```
 
 Demo 不需要 API Key，也不会修改仓库中的 `examples/calculator_bug`。它内部对确定性 fixture 显式使用无隔离执行，因此只适合作为本地演示；真实 `run` / `chat` 仍保持 fail-closed 沙箱默认值。Demo 依赖 POSIX 命令执行，支持 macOS、Linux 和 WSL2，不支持原生 Windows。
+
+## 命名验证矩阵
+
+按需要执行的顺序配置命名检查：
+
+```bash
+mca run "Fix the issue" \
+  --model deepseek \
+  --check tests "pytest -q" \
+  --check lint "ruff check ." \
+  --check types "pyright"
+```
+
+命名检查按串行执行，并且都必须在同一个未改变的工作区指纹状态下开始和结束。任何检查如果令受指纹覆盖的文件仍有改动，都会以 `WorkspaceChangedDuringVerification` 使整个矩阵失效；请在矩阵前运行生成器。被忽略的缓存路径继续遵循现有指纹策略。
+
+`--test-command` 仍是向后兼容的单检查形式。最多配置 16 个检查。矩阵最坏情况下耗时约为检查数乘以每个命令的超时时间。
+
+稳定的 `--test-command` 输出和事件字段保持兼容，但现在该单一旧命令如果让受指纹覆盖的文件保持改动，也会 fail closed。只能依照现有受信任 runtime artifact 策略使用被忽略的缓存路径。
+
+这些证据表明：配置的命令在一个工作区状态下按照 runtime 策略通过。它不证明测试完整性、代码正确性、模型质量或整体系统安全性。
+
+指纹在检查边界捕获。它能检测持久性改动，但无法证明命令没有在两次捕获之间完整地修改并恢复文件；此功能不声称提供不可变快照执行。
+
+矩阵配置命令不会直接序列化到结构化证据中，且输出有大小边界。对已知模式、环境变量值以及通过现有脱敏控制配置的值，脱敏均为尽力而为；任意命令输出可能回显命令文本或无法被完美分类的值。轨迹文件应视为敏感数据，未经审查不得发布。
 
 ## 配置密钥
 
@@ -308,8 +332,8 @@ Undo 原始恢复内容保存在状态根目录的私有 `undo/` 中，使用 `0
 - 新建 run/chat 时 dirty Git 工作区默认拒绝启动；`--allow-dirty` 会关闭这项保护，resume 前也必须自行检查并暂存额外改动
 - shell 默认关闭，测试命令和子进程使用收敛后的环境
 - shell/test 子进程在超时、Ctrl-C、SIGTERM 和异常后回收整个进程组；Docker 运行使用唯一 name/cidfile 并在退出时强制清理
-- `mca run` 即使没有检测到文件变化，也必须至少通过一次用户配置的权威测试才能提交
-- `mca run` 要求显式传入 `--model` 和 `--test-command`，并拒绝 `--model mock`；无 Key 的确定性流程请使用 `mca demo`
+- `mca run` 即使没有检测到文件变化，也必须至少通过一次用户配置的权威验证才能提交
+- `mca run` 要求显式传入 `--model` 和 `--test-command` 或命名 `--check`，并拒绝 `--model mock`；无 Key 的确定性流程请使用 `mca demo`
 - 工作区指纹覆盖内容、文件类型、权限位、symlink target、依赖目录及 Git 本地配置/hooks；缓存目录和易变 Git 数据库除外
 - 模型不能覆盖 `--test-command`；失败的权威测试、改变工作区指纹的后续操作以及 resume 会使旧验证失效
 - 权威命令被识别为 0 个测试时默认不能通过验证；`--allow-zero-tests` 会允许它通过，是需要用户明确接受的验证弱化

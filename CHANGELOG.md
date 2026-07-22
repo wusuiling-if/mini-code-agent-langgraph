@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-22
+
+### Added
+
+- Added ordered named `--check NAME COMMAND` verification matrices with at most 16 serial checks and additive, bounded, best-effort-redacted per-check evidence.
+
+### Changed
+
+- Refused verification when any named check, or the backward-compatible single `--test-command`, leaves a fingerprinted workspace file persistently changed; generators must run before verification.
+
+### Compatibility
+
+- Preserved stable `--test-command` output and event fields while applying the same fail-closed persisted-mutation rule to the legacy single-check path.
+- Added focused CLI, workflow-policy, hygiene, and end-to-end coverage for named matrices and strict mutation refusal.
+
+### Security
+
+- Documented that boundary fingerprint captures detect persisted changes but are not immutable snapshots, and that trajectory redaction is best effort and trajectories remain sensitive.
+- Kept the TrustBench boundary unchanged: this release adds no TrustBench extraction, adapters, or benchmark dependency, and the existing v0.3.2 offline benchmark contract remains unchanged.
+- Kept the established end-to-end recovery test outside that unchanged v0.3.2 benchmark boundary.
+
 ## [0.3.3] - 2026-07-22
 
 ### Added
