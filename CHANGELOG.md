@@ -8,11 +8,11 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Added
 
-- Added `mca sandbox probe`, a provider-free disposable capability check for workspace writes, denied sibling-file writes, denied Unix-socket connections, and denied TCP connections, plus opt-in real-backend CI coverage.
+- Added `mca sandbox probe`, a provider-free disposable capability check for workspace writes, denied sibling-file writes, denied Unix-socket connections, and denied TCP connections, plus dedicated real-backend CI that runs automatically on pushes and pull requests.
 
 ### Changed
 
-- Hardened Linux `bwrap` with fully unshared namespaces and private `/run`, `/tmp`, home, `/dev`, and `/proc` views while keeping only the workspace and executor runtime writable.
+- Hardened Linux `bwrap` with fully unshared namespaces and a read-only host root. The workspace and executor runtime are the only writable host paths; private `/run`, `/tmp`, and home tmpfs mounts are also writable inside the sandbox, with private `/dev` and fresh `/proc` views.
 - Limited macOS `sandbox-exec` writes to the workspace and its private runtime tree, removing shared `/tmp` and `/private/tmp` write exceptions.
 - Changed Docker execution on POSIX to use the invoking numeric UID:GID, a private size-limited `/tmp`, and explicit private `HOME`/`TMPDIR`, Python-bytecode, and Git environment values.
 
@@ -23,7 +23,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Compatibility
 
-- Preserved the existing `auto` selection order and explicit backend names. Docker images used by `mca sandbox probe` must provide `/bin/sh` and `python3`; normal coding runs may still use another pre-pulled custom image without invoking the probe command.
+- Preserved the existing `auto` selection order and explicit backend names. Every Docker image used for coding or tests must provide `/bin/sh`; `mca sandbox probe` additionally requires `python3`. Normal coding runs may still use another pre-pulled custom image when it satisfies the `/bin/sh` requirement.
 - POSIX Docker workspaces now produce files as the invoking host UID:GID rather than container root; images that require root must be adjusted or replaced.
 
 ## [0.3.2] - 2026-07-20

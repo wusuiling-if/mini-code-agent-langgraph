@@ -321,12 +321,12 @@ Undo 原始恢复内容保存在状态根目录的私有 `undo/` 中，使用 `0
 沙箱可用性依赖操作系统：
 
 - macOS：优先尝试系统 `sandbox-exec`。它拒绝网络和默认写入，隐藏真实 home（其中的目标工作区除外），只允许写工作区和 executor 所有的私有 runtime tree；`HOME`、`TMPDIR` 指向该私有目录，共享 `/tmp` 与 `/private/tmp` 不可写。它是系统策略 profile，不是 PID namespace、cgroup 或容器边界，而且系统可能弃用或限制它
-- Linux：优先尝试 `bwrap`。它 unshare namespaces，提供私有 `/run`、`/tmp`、home、`/dev` 与全新 `/proc`，宿主根目录只读，只有工作区与私有 runtime tree 可写；其 PID namespace 对后代进程的收容强于普通进程组，但仍依赖宿主内核与 Bubblewrap
+- Linux：优先尝试 `bwrap`。它 unshare namespaces 并保持宿主根目录只读；workspace 与 executor runtime tree 是仅有的可写宿主路径，沙箱内的私有 `/run`、`/tmp` 和 home tmpfs 也可写，并使用私有 `/dev` 与全新 `/proc`。其 PID namespace 对后代进程的收容强于普通进程组，但仍依赖宿主内核与 Bubblewrap
 - macOS / Linux：安装并启动 Docker，并预先拉取沙箱镜像后可选择 `--sandbox docker`；容器无网络、根文件系统只读、丢弃 capabilities、设置资源上限，只有工作区 bind mount 可写，`/tmp` 是私有且有大小限制的 tmpfs。在 POSIX 宿主上以调用者的数字 UID:GID 运行，并显式设置私有 `HOME`/`TMPDIR`、Python bytecode 与 Git 环境。默认镜像是 `python:3.11-slim`，可用 `--docker-image` 或 `MCA_DOCKER_IMAGE` 指向带目标项目依赖的预构建镜像，运行时不会隐式拉镜像
 - 原生 Windows：`0.3.x` 不支持完整的 Agent runtime；请在 WSL2/Linux 中使用上述隔离后端
 - 没有可用后端时，只有显式 `--sandbox none` 才允许不隔离执行
 
-可用 `mca sandbox probe --sandbox auto` 探测真实边界，也可显式指定 `sandbox-exec`、`bwrap` 或 `docker`。Docker probe 使用的镜像必须提供 `/bin/sh` 与 `python3`；普通编码运行若不调用 probe，仍可使用其他预拉取的自定义镜像。原生进程组清理无法证明 double-fork 后创建新 session 的进程已被回收；Bubblewrap 的 PID namespace 和 Docker 容器边界提供更强的后代进程收容，但所有后端都不是完整 OS/process containment 保证。
+可用 `mca sandbox probe --sandbox auto` 探测真实边界，也可显式指定 `sandbox-exec`、`bwrap` 或 `docker`。所有 Docker coding/test 镜像都必须提供 `/bin/sh`，probe 还额外需要 `python3`；普通编码运行仍可使用满足 `/bin/sh` 要求的其他预拉取自定义镜像。原生进程组清理无法证明 double-fork 后创建新 session 的进程已被回收；Bubblewrap 的 PID namespace 和 Docker 容器边界提供更强的后代进程收容，但所有后端都不是完整 OS/process containment 保证。
 
 沙箱、路径检查和脱敏都不是运行不可信仓库的绝对安全边界。不要让 Agent 在包含生产凭证、SSH 私钥或不应被模型读取的数据目录中运行。
 

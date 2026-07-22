@@ -60,9 +60,9 @@ Never include a real API key, access token, private repository content, or an un
 - Structured file tools resolve paths inside the workspace and reject symbolic-link traversal for protected operations.
 - Dirty Git worktrees are rejected by default so existing work is not silently mixed with agent changes.
 - Arbitrary shell access is disabled by default. `/ask` mode has a runtime read-only allowlist.
-- `run` and `chat` probe the requested command-isolation backend and fail closed when none works. `--sandbox none` is an explicit opt-out.
+- `run` and coding-enabled `chat` sessions (those started with `--test-command`) probe the requested command-isolation backend and fail closed when none works. An `/ask`-only chat started without `--test-command` skips the probe because it cannot execute tests, shell commands, or coding tools. `--sandbox none` is an explicit opt-out.
 - `mca sandbox probe` uses disposable data to check workspace writes, denied sibling-file writes, denied Unix-socket connections, and denied TCP connections without contacting a model provider or target repository. It rejects `--sandbox none`; a passing probe is evidence for those checks only, not a general proof of safe execution.
-- Linux `bwrap` unshares namespaces and uses private `/run`, `/tmp`, home, `/dev`, and `/proc` views. The host root is read-only; only the workspace and executor-owned private runtime tree are writable.
+- Linux `bwrap` unshares namespaces and keeps the host root read-only. The workspace and executor-owned runtime tree are the only writable host paths; private writable tmpfs mounts provide `/run`, `/tmp`, and home, alongside private `/dev` and fresh `/proc` views.
 - macOS `sandbox-exec` denies network and default writes, hides the real home except for a workspace below it, and permits writes only to that workspace and the private runtime tree used for `HOME` and `TMPDIR`. Shared `/tmp` and `/private/tmp` are not writable.
 - Docker runs without network or capabilities, with a read-only root, resource limits, one writable workspace bind, and a private size-limited `/tmp`. On POSIX it maps the invoking numeric UID:GID and explicitly sets private `HOME`/`TMPDIR`, Python-bytecode, and Git environment values.
 - Native Windows is limited to informational CLI/configuration paths in `0.3.x`; run the full Agent runtime and structured file tools from WSL2/Linux.
@@ -87,14 +87,14 @@ The project does **not** guarantee:
 
 Flags such as `--sandbox none`, `--allow-shell`, `--allow-dirty`, `--yes`, `--force`, and `--allow-legacy-unsafe` deliberately weaken one or more controls. Use them only in disposable, credential-free workspaces after reviewing the consequence.
 
-Docker isolation additionally assumes the selected image is trusted. Images used with `mca sandbox probe` must provide `/bin/sh` and `python3`; the default `python:3.11-slim` image does. A normal coding run may use a different pre-pulled image without running this separate probe command.
+Docker isolation additionally assumes the selected image is trusted. Every image used for coding or tests must provide `/bin/sh`; `mca sandbox probe` additionally requires `python3`. The default `python:3.11-slim` image provides both. A normal coding run may use a different pre-pulled image only if it still provides `/bin/sh`.
 
 ## Handling secrets and artifacts
 
 - Prefer the private config file created by `mca init`; on POSIX systems it is expected to be a regular, user-owned `0600` file.
 - Do not place production credentials, SSH keys, signing keys, or unrelated sensitive data under `--cwd`.
 - Treat every trajectory as sensitive because it may contain source, prompts, file reads, and command output. Review and redact it, diffs, crash logs, and diagnostic output before sharing; redaction is defense in depth, not proof that every secret format was removed.
-- `mca doctor` checks secret-file metadata without reading that file's contents, and checks only in-process key presence without printing values; a key stored solely in the private env file is intentionally not verified by doctor. Its sandbox check is static PATH discovery, while `run` and `chat` perform the authoritative usability probe.
+- `mca doctor` checks secret-file metadata without reading that file's contents, and checks only in-process key presence without printing values; a key stored solely in the private env file is intentionally not verified by doctor. Its sandbox check is static PATH discovery, while `run` and coding-enabled `chat` perform the authoritative usability probe; `/ask`-only chat skips it.
 - Use short-lived test credentials for reproductions and rotate anything copied into a terminal transcript, issue, or chat.
 
 ## Security-sensitive changes
