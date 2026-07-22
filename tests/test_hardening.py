@@ -937,7 +937,7 @@ def test_resume_discards_prior_matrix_evidence(
                 tool_calls=[tool_call("run_tests", "initial-check")],
             )
 
-    class CheckThenSubmitModel:
+    class SubmitThenCheckAndSubmitModel:
         def __init__(self):
             self.calls = 0
 
@@ -947,6 +947,11 @@ def test_resume_discards_prior_matrix_evidence(
         def invoke(self, messages):
             self.calls += 1
             if self.calls == 1:
+                return AIMessage(
+                    content="try stale submit",
+                    tool_calls=[tool_call("submit", "stale-submit")],
+                )
+            if self.calls == 2:
                 return AIMessage(
                     content="verify again",
                     tool_calls=[tool_call("run_tests", "fresh-check")],
@@ -969,27 +974,41 @@ def test_resume_discards_prior_matrix_evidence(
         quiet=True,
     ).run("verify")
     checkpoint_steps = first["steps"]
+    assert first["verification_status"] == "passed"
 
     resumed = MiniCodeAgent(
-        CheckThenSubmitModel(),
+        SubmitThenCheckAndSubmitModel(),
         BashExecutor(
             repo,
             approval_mode="yolo",
             sandbox_mode="none",
             verification_checks=(check,),
         ),
-        max_steps=3,
+        max_steps=4,
         trajectory_path=trajectory_path,
         quiet=True,
     ).run(resume_data=load_trajectory(trajectory_path))
-    fresh_checks = [
+    resumed_events = [
         event
         for event in resumed["events"]
-        if event.get("tool") == "run_tests"
-        and int(event.get("step", 0)) > checkpoint_steps
+        if int(event.get("step", 0)) > checkpoint_steps
     ]
+    tool_events = [
+        event
+        for event in resumed_events
+        if event.get("type") == "tool"
+    ]
+    assert [event["tool"] for event in tool_events] == [
+        "submit",
+        "run_tests",
+        "submit",
+    ]
+    stale_submit, fresh_check, accepted_submit = tool_events
 
-    assert len(fresh_checks) == 1
+    assert stale_submit["blocked"] is True
+    assert stale_submit["exception_info"] == "VerificationRequired"
+    assert fresh_check["verification_checks"][0]["name"] == "tests"
+    assert accepted_submit["submitted"] is True
     assert resumed["exit_status"] == "Submitted"
 
 

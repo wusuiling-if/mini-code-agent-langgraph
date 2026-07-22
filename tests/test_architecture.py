@@ -7,6 +7,8 @@ from typing import get_type_hints
 import pytest
 
 from mini_code_agent.contracts import SnapshotLike, ToolExecutor, ToolResult
+from mini_code_agent.model import run_tests
+from mini_code_agent.prompts import CHAT_SYSTEM_PROMPT, SYSTEM_PROMPT
 from mini_code_agent.verification import VerificationGate, execute_tool_batch
 
 
@@ -118,3 +120,14 @@ def test_legacy_runtime_exports_are_preserved():
     assert LegacyGate is VerificationGate
     assert legacy_compact is compact_messages
     assert LegacyToolResult is ToolResult
+
+
+def test_run_tests_contract_is_argument_free_and_prompts_require_full_matrix():
+    schema = run_tests.args_schema.model_json_schema()
+
+    assert schema["properties"] == {}
+    assert schema.get("required", []) == []
+    for prompt in (SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT):
+        assert "run_tests always executes the complete matrix configured by the user" in prompt
+        assert "Never invent, select, skip, reorder, or override" in prompt
+        assert "Any later file change requires another complete" in prompt

@@ -16,6 +16,45 @@ from mini_code_agent.model import create_model
 from mini_code_agent.trajectory import load_trajectory, summarize_trajectory, undo_trajectory
 
 
+def walk_json_values(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield "key", str(key)
+            yield from walk_json_values(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from walk_json_values(item)
+    elif isinstance(value, str):
+        yield "string", value
+        try:
+            embedded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if isinstance(embedded, (dict, list)):
+            yield from walk_json_values(embedded)
+
+
+def assert_matrix_internals_absent(
+    payload,
+    *,
+    commands: tuple[str, ...],
+    sentinels: tuple[str, ...],
+    internal_values: tuple[str, ...] = (),
+) -> None:
+    walked = list(walk_json_values(payload))
+    keys = {value for kind, value in walked if kind == "key"}
+    strings = [value for kind, value in walked if kind == "string"]
+
+    forbidden_fields = {
+        "_verification_ignore_paths",
+        "verification_boundary_checked",
+        "verification_fingerprint",
+    }
+    assert forbidden_fields.isdisjoint(keys)
+    for secret in (*forbidden_fields, *commands, *sentinels, *internal_values):
+        assert all(secret not in value for value in strings)
+
+
 def make_calculator_repo(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     (root / "calculator.py").write_text(
@@ -245,12 +284,10 @@ class MatrixModel:
 
 def test_agent_persists_redacted_matrix_evidence_and_submits(tmp_path: Path):
     trajectory_path = tmp_path / "run.json"
-    tests_command = (
-        f"{shlex.quote(sys.executable)} -c 'print(\"Ran 2 tests\")'"
-    )
-    lint_command = (
-        f"{shlex.quote(sys.executable)} -c 'print(\"clean\")'"
-    )
+    tests_sentinel = "MCA_TEST_COMMAND_SENTINEL_7f3a"
+    lint_sentinel = "MCA_LINT_COMMAND_SENTINEL_8b4c"
+    tests_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(f'print({tests_sentinel!r})')}"
+    lint_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(f'print({lint_sentinel!r})')}"
     agent = MiniCodeAgent(
         MatrixModel(),
         BashExecutor(
@@ -276,20 +313,28 @@ def test_agent_persists_redacted_matrix_evidence_and_submits(tmp_path: Path):
         "tests",
         "lint",
     ]
-    rendered = trajectory_path.read_text(encoding="utf-8")
-    assert tests_command not in rendered
-    assert lint_command not in rendered
-    assert "_verification_ignore_paths" not in rendered
-    assert "verification_fingerprint" not in rendered
+    persisted = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    redaction_args = {
+        "commands": (tests_command, lint_command),
+        "sentinels": (tests_sentinel, lint_sentinel),
+        "internal_values": (str(trajectory_path.resolve()),),
+    }
+    assert_matrix_internals_absent(trajectory, **redaction_args)
+    assert_matrix_internals_absent(persisted, **redaction_args)
+    assert_matrix_internals_absent(
+        event,
+        commands=(tests_command, lint_command),
+        sentinels=(tests_sentinel, lint_sentinel),
+        internal_values=(trajectory["verified_fingerprint"],),
+    )
 
 
 def test_chat_event_contains_only_redacted_matrix_evidence(tmp_path: Path):
-    tests_command = (
-        f"{shlex.quote(sys.executable)} -c 'print(\"Ran 2 tests\")'"
-    )
-    lint_command = (
-        f"{shlex.quote(sys.executable)} -c 'print(\"clean\")'"
-    )
+    trajectory_path = tmp_path / "chat.json"
+    tests_sentinel = "MCA_CHAT_TEST_SENTINEL_9c5d"
+    lint_sentinel = "MCA_CHAT_LINT_SENTINEL_a6e7"
+    tests_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(f'print({tests_sentinel!r})')}"
+    lint_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(f'print({lint_sentinel!r})')}"
     session = ConversationalCodeAgent(
         MatrixModel(),
         BashExecutor(
@@ -301,6 +346,7 @@ def test_chat_event_contains_only_redacted_matrix_evidence(tmp_path: Path):
                 VerificationCheck("lint", lint_command),
             ),
         ),
+        trajectory_path=trajectory_path,
         quiet=True,
     )
 
@@ -314,8 +360,20 @@ def test_chat_event_contains_only_redacted_matrix_evidence(tmp_path: Path):
         "tests",
         "lint",
     ]
-    assert tests_command not in str(event)
-    assert lint_command not in str(event)
+    persisted = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    redaction_args = {
+        "commands": (tests_command, lint_command),
+        "sentinels": (tests_sentinel, lint_sentinel),
+        "internal_values": (str(trajectory_path.resolve()),),
+    }
+    assert_matrix_internals_absent(session.events, **redaction_args)
+    assert_matrix_internals_absent(persisted, **redaction_args)
+    assert_matrix_internals_absent(
+        event,
+        commands=(tests_command, lint_command),
+        sentinels=(tests_sentinel, lint_sentinel),
+        internal_values=(persisted["verified_fingerprint"],),
+    )
 
 
 def test_agent_blocks_submit_until_latest_edit_is_verified(tmp_path: Path):
