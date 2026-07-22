@@ -27,9 +27,12 @@ mca demo
 
 ```bash
 mca doctor --cwd /path/to/repo --sandbox auto --provider auto
+mca sandbox probe --sandbox auto
 ```
 
-`doctor` performs static prerequisite checks. `run` and coding-enabled `chat` sessions perform the authoritative sandbox usability probe at startup; a coding-enabled chat is one started with `--test-command`. An `/ask`-only chat started without `--test-command` skips the sandbox probe because it cannot run tests, shell commands, or coding tools. Doctor checks whether a provider key is present in the current process environment without printing its value, and inspects private env-file metadata without opening the file.
+`doctor` performs static prerequisite checks. `run` and coding-enabled `chat` sessions perform the authoritative backend startup check; a coding-enabled chat is one started with `--test-command`. An `/ask`-only chat started without `--test-command` skips that check because it cannot run tests, shell commands, or coding tools. Doctor checks whether a provider key is present in the current process environment without printing its value, and inspects private env-file metadata without opening the file.
+
+`mca sandbox probe` goes further: without a provider key or target repository, it creates disposable data and checks that the selected backend permits a workspace write while denying a sibling-file overwrite, Unix-socket connections, and a TCP connection. It prints one `[PASS]` or `[FAIL]` result per check and rejects `--sandbox none`, which cannot demonstrate isolation. The probe itself is bounded and useful for validating a local setup, but a passing result is not proof that arbitrary untrusted code is safe.
 
 ## Run and chat
 
@@ -58,6 +61,16 @@ mca undo /path/to/run.traj.json --dry-run
 - Undo uses a private, HMAC-authenticated journal and rejects post-edit conflicts unless explicitly forced.
 - `--allow-zero-tests` explicitly weakens verification by allowing a recognized zero-test result to satisfy the gate. `--sandbox none`, `--allow-shell`, `--allow-dirty`, `--yes`, and force/legacy Undo options also deliberately weaken protections; `--sandbox auto` fails closed if no usable backend is found.
 - Native Windows supports informational CLI and configuration paths only. Run the full agent, structured tools, and `mca demo` from macOS, Linux, or WSL2. macOS uses `sandbox-exec`; Linux uses `bwrap` or Docker when available.
+
+Backend boundaries differ:
+
+| Backend | Enforced boundary | Important limit |
+| --- | --- | --- |
+| Linux `bwrap` | Unshares namespaces, presents private `/run`, `/tmp`, home, `/dev`, and `/proc` views, keeps the host root read-only, and makes only the workspace and private runtime tree writable. | Relies on the host kernel and installed Bubblewrap; its PID namespace strengthens descendant containment but is not a guarantee against a compromised host. |
+| macOS `sandbox-exec` | Denies network and default writes, hides the real home except for a workspace below it, and limits writes to the workspace plus an executor-owned private runtime tree used for `HOME` and `TMPDIR`; shared `/tmp` and `/private/tmp` are not writable. | It is an OS policy profile, not a PID namespace, cgroup, or container boundary, and Apple may deprecate or restrict it. |
+| Docker | Uses no network, a read-only/capability-free container, resource limits, a single writable workspace bind, and a private size-limited `/tmp`; on POSIX it maps the invoking numeric UID:GID and explicitly sets private `HOME`/`TMPDIR`, Python-bytecode, and Git environment values. | Relies on a trusted daemon, image, host kernel, and configuration. Probe images must contain `/bin/sh` and `python3`. |
+
+Native process-group cleanup after timeout, interruption, or exceptions is best effort: a double-forked process can create a new session and escape that process group. Bubblewrap's PID namespace and Docker's container boundary provide stronger descendant containment, but no backend provides an absolute OS/process-containment guarantee.
 
 These controls are defense in depth, not a guarantee that an untrusted repository, command, dependency, image, host, or provider is safe. Do not run it in a workspace containing production credentials. Read the complete [security policy](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/SECURITY.md) before use.
 

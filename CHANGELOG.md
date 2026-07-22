@@ -4,6 +4,28 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-22
+
+### Added
+
+- Added `mca sandbox probe`, a provider-free disposable capability check for workspace writes, denied sibling-file writes, denied Unix-socket connections, and denied TCP connections, plus opt-in real-backend CI coverage.
+
+### Changed
+
+- Hardened Linux `bwrap` with fully unshared namespaces and private `/run`, `/tmp`, home, `/dev`, and `/proc` views while keeping only the workspace and executor runtime writable.
+- Limited macOS `sandbox-exec` writes to the workspace and its private runtime tree, removing shared `/tmp` and `/private/tmp` write exceptions.
+- Changed Docker execution on POSIX to use the invoking numeric UID:GID, a private size-limited `/tmp`, and explicit private `HOME`/`TMPDIR`, Python-bytecode, and Git environment values.
+
+### Security
+
+- Added backend-specific boundary tests and documented that native process-group cleanup remains best effort: a double-fork can escape into a new session, and `sandbox-exec` does not provide PID-namespace, cgroup, or container-equivalent descendant containment.
+- A passing capability probe demonstrates only its bounded checks; it is not a guarantee that an arbitrary repository, command, dependency, image, daemon, kernel, or host is safe.
+
+### Compatibility
+
+- Preserved the existing `auto` selection order and explicit backend names. Docker images used by `mca sandbox probe` must provide `/bin/sh` and `python3`; normal coding runs may still use another pre-pulled custom image without invoking the probe command.
+- POSIX Docker workspaces now produce files as the invoking host UID:GID rather than container root; images that require root must be adjusted or replaced.
+
 ## [0.3.2] - 2026-07-20
 
 ### Added

@@ -61,6 +61,10 @@ Never include a real API key, access token, private repository content, or an un
 - Dirty Git worktrees are rejected by default so existing work is not silently mixed with agent changes.
 - Arbitrary shell access is disabled by default. `/ask` mode has a runtime read-only allowlist.
 - `run` and `chat` probe the requested command-isolation backend and fail closed when none works. `--sandbox none` is an explicit opt-out.
+- `mca sandbox probe` uses disposable data to check workspace writes, denied sibling-file writes, denied Unix-socket connections, and denied TCP connections without contacting a model provider or target repository. It rejects `--sandbox none`; a passing probe is evidence for those checks only, not a general proof of safe execution.
+- Linux `bwrap` unshares namespaces and uses private `/run`, `/tmp`, home, `/dev`, and `/proc` views. The host root is read-only; only the workspace and executor-owned private runtime tree are writable.
+- macOS `sandbox-exec` denies network and default writes, hides the real home except for a workspace below it, and permits writes only to that workspace and the private runtime tree used for `HOME` and `TMPDIR`. Shared `/tmp` and `/private/tmp` are not writable.
+- Docker runs without network or capabilities, with a read-only root, resource limits, one writable workspace bind, and a private size-limited `/tmp`. On POSIX it maps the invoking numeric UID:GID and explicitly sets private `HOME`/`TMPDIR`, Python-bytecode, and Git environment values.
 - Native Windows is limited to informational CLI/configuration paths in `0.3.x`; run the full Agent runtime and structured file tools from WSL2/Linux.
 - A successful test is bound to the current workspace fingerprint. Fingerprint-changing operations, a failed authoritative `run_tests`, and resume invalidate stale verification.
 - Resume starts from a complete tool boundary and requires fresh verification before submission. The new-run dirty-worktree gate is not a substitute for reviewing or stashing extra changes before resume.
@@ -77,10 +81,13 @@ The project does **not** guarantee:
 - confidentiality from a model provider after content is intentionally sent to that provider;
 - correctness or completeness of user-supplied tests;
 - recovery of every external side effect when a process is killed between tool boundaries;
+- complete descendant-process containment on native host backends: process-group cleanup is best effort, and a double-fork can create a new session. Bubblewrap's PID namespace and Docker's container boundary provide stronger containment, but `sandbox-exec` is not a PID namespace, cgroup, or container boundary;
 - availability against denial-of-service, resource exhaustion outside configured limits, or provider outages;
 - protection after the local account, Python environment, dependency chain, local HMAC key material, or host is compromised.
 
 Flags such as `--sandbox none`, `--allow-shell`, `--allow-dirty`, `--yes`, `--force`, and `--allow-legacy-unsafe` deliberately weaken one or more controls. Use them only in disposable, credential-free workspaces after reviewing the consequence.
+
+Docker isolation additionally assumes the selected image is trusted. Images used with `mca sandbox probe` must provide `/bin/sh` and `python3`; the default `python:3.11-slim` image does. A normal coding run may use a different pre-pulled image without running this separate probe command.
 
 ## Handling secrets and artifacts
 

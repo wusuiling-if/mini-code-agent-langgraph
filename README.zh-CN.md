@@ -23,11 +23,14 @@ mca demo
 
 ```bash
 mca doctor --cwd /path/to/repo --sandbox auto --provider auto
+mca sandbox probe --sandbox auto
 ```
 
 这条无 Key 诊断会把 provider 记为 warning 而不是失败。`mca demo` 当前支持 macOS、Linux 与 WSL2；原生 Windows 请使用 WSL2/Linux 环境运行完整 Agent。
 
-`doctor` 只静态检查 sandbox 可执行文件是否在 PATH。`run` 和启用了编码能力的 `chat` 会话会在启动时执行权威 sandbox 可用性 probe；这里“启用编码能力”指启动时传入了 `--test-command`。未提供 `--test-command` 的纯 `/ask` 会话会跳过 sandbox probe，因为它不能运行测试、shell 或编码工具。`doctor` 只检查当前进程环境中是否存在 provider key，不会打印 key 值；对于私有 env 文件，它只检查元数据而不会打开文件。
+`doctor` 只静态检查 sandbox 可执行文件是否在 PATH。`run` 和启用了编码能力的 `chat` 会话会在启动时执行权威后端启动检查；这里“启用编码能力”指启动时传入了 `--test-command`。未提供 `--test-command` 的纯 `/ask` 会话会跳过该检查，因为它不能运行测试、shell 或编码工具。`doctor` 只检查当前进程环境中是否存在 provider key，不会打印 key 值；对于私有 env 文件，它只检查元数据而不会打开文件。
+
+`mca sandbox probe` 会在不需要 provider key、也不接触目标仓库的前提下创建可丢弃数据，并验证所选后端能写入临时工作区，同时拒绝覆盖相邻文件、连接 Unix socket 和建立 TCP 连接。每项检查输出一行 `[PASS]` 或 `[FAIL]`；`--sandbox none` 会被拒绝，因为它不能证明隔离。该 probe 有超时边界，可用于验证本机配置，但即使全部通过也不代表任意不可信代码都是安全的。
 
 ## 安全与可靠性边界
 
@@ -38,7 +41,7 @@ mca doctor --cwd /path/to/repo --sandbox auto --provider auto
 | 崩溃恢复 | run/chat 从完整工具边界恢复，并使恢复前的验证结果失效 | 被强制终止的外部命令可能已经产生部分副作用 |
 | HMAC 认证撤销 | 私有 Undo journal 以 HMAC 绑定轨迹、工作区、路径和内容 hash，并在覆盖前检查冲突 | HMAC 校验可检测本机 journal 是否被篡改，不证明修改在语义上安全 |
 | Fail-closed 隔离 | `auto` 实际探测后端；没有可用后端时拒绝执行命令，除非用户显式选择 `none` | macOS 使用 `sandbox-exec`，Linux 使用 `bwrap` 或 Docker；原生 Windows 的完整 Agent runtime 尚不支持 |
-| 进程清理 | 超时、Ctrl-C、SIGTERM 和异常后回收命令进程组及本次 Docker 容器 | 宿主内核、Docker daemon 或依赖链失陷不在保证范围内 |
+| 进程清理 | 超时、Ctrl-C、SIGTERM 和异常后尝试回收命令进程组及本次 Docker 容器 | 原生进程组清理是 best effort；double-fork 进程可创建新 session，`sandbox-exec` 不提供 PID namespace、cgroup 或容器等价的完整后代进程收容 |
 
 这些机制是纵深防御，不是绝对安全沙箱。不要把不受信任的仓库与生产凭证放在同一工作区，也不要未经检查运行仓库自带的构建或测试命令；完整威胁模型见 [SECURITY.md](SECURITY.md)。
 
@@ -317,11 +320,13 @@ Undo 原始恢复内容保存在状态根目录的私有 `undo/` 中，使用 `0
 
 沙箱可用性依赖操作系统：
 
-- macOS：优先尝试系统 `sandbox-exec`（系统可能弃用或限制它）
-- Linux：优先尝试 `bwrap`
-- macOS / Linux：安装并启动 Docker，并预先拉取沙箱镜像后可选择 `--sandbox docker`；默认镜像是 `python:3.11-slim`，可用 `--docker-image` 或 `MCA_DOCKER_IMAGE` 指向带目标项目依赖的预构建镜像，运行时不会隐式拉镜像
+- macOS：优先尝试系统 `sandbox-exec`。它拒绝网络和默认写入，隐藏真实 home（其中的目标工作区除外），只允许写工作区和 executor 所有的私有 runtime tree；`HOME`、`TMPDIR` 指向该私有目录，共享 `/tmp` 与 `/private/tmp` 不可写。它是系统策略 profile，不是 PID namespace、cgroup 或容器边界，而且系统可能弃用或限制它
+- Linux：优先尝试 `bwrap`。它 unshare namespaces，提供私有 `/run`、`/tmp`、home、`/dev` 与全新 `/proc`，宿主根目录只读，只有工作区与私有 runtime tree 可写；其 PID namespace 对后代进程的收容强于普通进程组，但仍依赖宿主内核与 Bubblewrap
+- macOS / Linux：安装并启动 Docker，并预先拉取沙箱镜像后可选择 `--sandbox docker`；容器无网络、根文件系统只读、丢弃 capabilities、设置资源上限，只有工作区 bind mount 可写，`/tmp` 是私有且有大小限制的 tmpfs。在 POSIX 宿主上以调用者的数字 UID:GID 运行，并显式设置私有 `HOME`/`TMPDIR`、Python bytecode 与 Git 环境。默认镜像是 `python:3.11-slim`，可用 `--docker-image` 或 `MCA_DOCKER_IMAGE` 指向带目标项目依赖的预构建镜像，运行时不会隐式拉镜像
 - 原生 Windows：`0.3.x` 不支持完整的 Agent runtime；请在 WSL2/Linux 中使用上述隔离后端
 - 没有可用后端时，只有显式 `--sandbox none` 才允许不隔离执行
+
+可用 `mca sandbox probe --sandbox auto` 探测真实边界，也可显式指定 `sandbox-exec`、`bwrap` 或 `docker`。Docker probe 使用的镜像必须提供 `/bin/sh` 与 `python3`；普通编码运行若不调用 probe，仍可使用其他预拉取的自定义镜像。原生进程组清理无法证明 double-fork 后创建新 session 的进程已被回收；Bubblewrap 的 PID namespace 和 Docker 容器边界提供更强的后代进程收容，但所有后端都不是完整 OS/process containment 保证。
 
 沙箱、路径检查和脱敏都不是运行不可信仓库的绝对安全边界。不要让 Agent 在包含生产凭证、SSH 私钥或不应被模型读取的数据目录中运行。
 
