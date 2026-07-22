@@ -19,7 +19,7 @@ All notable changes to this project are documented in this file. The format foll
 ### Security
 
 - Added backend-specific boundary tests and documented that native process-group cleanup remains best effort: a double-fork can escape into a new session, and `sandbox-exec` does not provide PID-namespace, cgroup, or container-equivalent descendant containment.
-- Made probe results fail closed on negative executor returns, timeouts, exceptions, missing sentinel preconditions, and an unavailable verified host temp base.
+- Made probe results require reserved, cause-specific evidence exits: native mutation accepts only `EPERM`, `EACCES`, or `EROFS`, while Docker verifies the root mount's `ST_RDONLY` flag instead of inferring read-only state from a failed write. Other positive exits, negative executor returns, timeouts, exceptions, missing sentinel preconditions, and unavailable or `/tmp`-aliased host temp bases fail closed.
 - A passing capability probe demonstrates only its bounded checks; it is not a guarantee that an arbitrary repository, command, dependency, image, daemon, kernel, or host is safe.
 
 ### Compatibility

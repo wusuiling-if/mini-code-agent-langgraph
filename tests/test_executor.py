@@ -215,3 +215,18 @@ def test_docker_argv_contains_exact_network_none_pair(
 
     network_index = argv.index("--network")
     assert argv[network_index : network_index + 2] == ["--network", "none"]
+
+
+def test_docker_argv_contains_read_only_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    executor = BashExecutor(tmp_path, sandbox_mode="docker")
+    monkeypatch.setattr(
+        executor,
+        "_trusted_executable",
+        lambda name: "/usr/bin/docker" if name == "docker" else "",
+    )
+
+    argv = executor._sandboxed_argv(["/bin/sh", "-c", ":"])
+
+    assert argv.count("--read-only") == 1

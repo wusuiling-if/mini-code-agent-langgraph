@@ -30,7 +30,7 @@ mca sandbox probe --sandbox auto
 
 `doctor` 只静态检查 sandbox 可执行文件是否在 PATH。`run` 和启用了编码能力的 `chat` 会话会在启动时执行权威后端启动检查；这里“启用编码能力”指启动时传入了 `--test-command`。未提供 `--test-command` 的纯 `/ask` 会话会跳过该检查，因为它不能运行测试、shell 或编码工具。`doctor` 只检查当前进程环境中是否存在 provider key，不会打印 key 值；对于私有 env 文件，它只检查元数据而不会打开文件。
 
-`mca sandbox probe` 会在不需要 provider key、也不接触目标仓库的前提下创建可丢弃数据，并检查工作区写入以及后端特定的外部写入、Unix socket 和网络边界。原生后端必须先精确读到宿主 sentinel，再拒绝修改它；Docker 必须看不到该 sentinel，并另外拒绝写入只读容器根目录。`bwrap` 与 Docker 必须隐藏受控及已知的宿主 Unix socket；`sandbox-exec` 可以看到路径，但连接必须被拒绝。网络检查先对 TEST-NET 地址尝试不发送数据包的 UDP `connect`，仅在进程无法取得或使用出站路由时继续要求受控 loopback TCP 连接被拒绝。每项检查输出一行 `[PASS]` 或 `[FAIL]`；`--sandbox none` 会被拒绝，因为它不能证明隔离。该 probe 有超时边界，可用于验证本机配置，但全部通过也只证明这些检查，并不代表任意不可信代码都是安全的。
+`mca sandbox probe` 会在不需要 provider key、也不接触目标仓库的前提下创建可丢弃数据，并检查工作区写入以及后端特定的外部写入、Unix socket 和网络边界。原生后端必须先精确读到宿主 sentinel，并且只有修改被 `EPERM`、`EACCES` 或 `EROFS` 阻止时才返回 probe 保留的证据退出码；Docker 必须看不到该 sentinel，并另外报告 `/` 挂载的 `ST_RDONLY` 标志。其他正数退出码、启动失败、异常和超时均视为失败，而不是拒绝证据。`bwrap` 与 Docker 必须隐藏受控及已知的宿主 Unix socket；`sandbox-exec` 可以看到路径，但连接必须被拒绝。网络检查先对 TEST-NET 地址尝试不发送数据包的 UDP `connect`，仅在进程无法取得或使用出站路由时继续要求受控 loopback TCP 连接被拒绝。每项检查输出一行 `[PASS]` 或 `[FAIL]`；`--sandbox none` 会被拒绝，因为它不能证明隔离。该 probe 有超时边界，可用于验证本机配置，但全部通过也只证明这些检查，并不代表任意不可信代码都是安全的。
 
 ## 安全与可靠性边界
 

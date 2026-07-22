@@ -15,6 +15,8 @@ from mini_code_agent.utils import truncate_text
 
 _CONNECTION_BLOCKED_EXIT = 73
 _SOCKET_VISIBLE_BLOCKED_EXIT = 74
+_BOUNDARY_EVIDENCE_EXIT = 75
+_UNEXPECTED_OSERROR_EXIT = 76
 _DETAIL_LIMIT = 500
 _HOST_TEMP_BASE = Path("/var/tmp")
 _PROTECTED_CONTENT = "protected\n"
@@ -59,20 +61,27 @@ def _returned(result: Any, returncode: int) -> bool:
     ).strip()
 
 
-def _ordinary_denial(result: Any) -> bool:
-    return result.returncode > 0 and not str(result.exception_info or "").strip()
-
-
 def _verified_host_temp_base(candidate: Path = _HOST_TEMP_BASE) -> Path | None:
     """Return a host-visible temp base only after proving it writable."""
 
     fd: int | None = None
     raw_path: str | None = None
+    resolved_candidate: Path | None = None
     verified = False
     try:
-        if not candidate.is_dir():
+        resolved_candidate = candidate.resolve(strict=True)
+        masked_tmp = Path("/tmp").resolve(strict=True)
+        try:
+            resolved_candidate.relative_to(masked_tmp)
+        except ValueError:
+            pass
+        else:
             return None
-        fd, raw_path = tempfile.mkstemp(prefix=".mca-sandbox-probe-", dir=candidate)
+        if not resolved_candidate.is_dir():
+            return None
+        fd, raw_path = tempfile.mkstemp(
+            prefix=".mca-sandbox-probe-", dir=resolved_candidate
+        )
         verified = os.write(fd, b"verified\n") == len(b"verified\n")
     except OSError:
         verified = False
@@ -87,7 +96,7 @@ def _verified_host_temp_base(candidate: Path = _HOST_TEMP_BASE) -> Path | None:
                 Path(raw_path).unlink()
             except OSError:
                 verified = False
-    return candidate if verified else None
+    return resolved_candidate if verified and resolved_candidate is not None else None
 
 
 def _python_command(source: str) -> str:
@@ -163,6 +172,31 @@ def _udp_route_source() -> str:
         f"sys.exit({_CONNECTION_BLOCKED_EXIT})"
         "\nelse: print('route-present'); sys.exit(0)"
         "\nfinally: sock.close()"
+    )
+
+
+def _native_mutation_source(path: Path) -> str:
+    return (
+        "import errno,sys; "
+        f"path={str(path)!r}; "
+        "\ntry:"
+        "\n with open(path, 'w', encoding='utf-8') as handle: handle.write('tampered\\n')"
+        "\nexcept OSError as exc:"
+        "\n if exc.errno in (errno.EPERM, errno.EACCES, errno.EROFS): "
+        "print('mutation-blocked:' + type(exc).__name__); "
+        f"sys.exit({_BOUNDARY_EVIDENCE_EXIT})"
+        "\n print('mutation-error:' + type(exc).__name__); "
+        f"sys.exit({_UNEXPECTED_OSERROR_EXIT})"
+        "\nelse: print('mutation-succeeded'); sys.exit(0)"
+    )
+
+
+def _docker_root_readonly_source() -> str:
+    return (
+        "import os,sys; flags=os.statvfs('/').f_flag; "
+        "\nif flags & os.ST_RDONLY: print('root-read-only'); "
+        f"sys.exit({_BOUNDARY_EVIDENCE_EXIT})"
+        "\nprint('root-not-read-only'); sys.exit(0)"
     )
 
 
@@ -245,11 +279,13 @@ def run_sandbox_probe(
             )
             outside_results.append((visibility_result, "host sentinel invisibility"))
             outside_result = executor.execute_bash(
-                "printf 'tampered\\n' > /mca-sandbox-probe-outside"
+                _python_command(_docker_root_readonly_source())
             )
-            outside_results.append((outside_result, "read-only root write"))
+            outside_results.append((outside_result, "read-only root mount flag"))
             outside_precondition = _returned(visibility_result, 0)
-            outside_denied = _ordinary_denial(outside_result)
+            outside_denied = _returned(
+                outside_result, _BOUNDARY_EVIDENCE_EXIT
+            )
         else:
             visibility_result = executor.execute_bash(
                 f"cat -- {protected_command_path}"
@@ -260,10 +296,12 @@ def run_sandbox_probe(
             ) and visibility_result.output == _PROTECTED_CONTENT
             if outside_precondition:
                 outside_result = executor.execute_bash(
-                    f"printf 'tampered\\n' > {protected_command_path}"
+                    _python_command(_native_mutation_source(protected))
                 )
                 outside_results.append((outside_result, "host sentinel write"))
-                outside_denied = _ordinary_denial(outside_result)
+                outside_denied = _returned(
+                    outside_result, _BOUNDARY_EVIDENCE_EXIT
+                )
             else:
                 outside_denied = False
         try:
@@ -275,11 +313,18 @@ def run_sandbox_probe(
         outside_passed = (
             outside_precondition and outside_denied and protected_unchanged
         )
-        outside_summary = (
-            "outside boundary precondition passed, write denied, sentinel unchanged"
-            if outside_passed
-            else "outside boundary was not safely verified"
-        )
+        if not outside_passed:
+            outside_summary = "outside boundary was not safely verified"
+        elif backend == "docker":
+            outside_summary = (
+                "host sentinel invisible, read-only root mount verified, "
+                "sentinel unchanged"
+            )
+        else:
+            outside_summary = (
+                "outside boundary precondition passed, write denied, "
+                "sentinel unchanged"
+            )
         outside_detail = "; ".join(
             _result_detail(executor, result, summary)
             for result, summary in outside_results

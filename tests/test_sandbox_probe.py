@@ -55,7 +55,7 @@ class _FakeExecutor:
             (
                 ToolResult("bash", "sensitive write allowed", 0, 0),
                 ToolResult("bash", "protected\n", 0, 0),
-                ToolResult("bash", "sensitive write denied", 1, 0),
+                ToolResult("bash", "sensitive write denied", 75, 0),
                 ToolResult("bash", "sensitive socket denied", 73, 0),
                 ToolResult("bash", "sensitive route denied", 73, 0),
                 ToolResult("bash", "sensitive network denied", 73, 0),
@@ -125,7 +125,7 @@ class _CommandRoutingExecutor:
     native_read_exception = ""
     docker_visibility_returncode = 0
     docker_visibility_exception = ""
-    mutation_returncode = 1
+    mutation_returncode = 75
     mutation_exception = ""
 
     def __post_init__(self) -> None:
@@ -148,6 +148,14 @@ class _CommandRoutingExecutor:
             return ToolResult("bash", "route result", self.udp_returncode, 0)
         if "AF_INET" in command and "SOCK_STREAM" in command:
             return ToolResult("bash", "tcp result", self.tcp_returncode, 0)
+        if "statvfs" in command:
+            return ToolResult(
+                "bash",
+                "root mount result",
+                self.mutation_returncode,
+                0,
+                exception_info=self.mutation_exception,
+            )
         if command.startswith("cat "):
             return ToolResult(
                 "bash",
@@ -339,6 +347,64 @@ def test_native_outside_write_first_reads_exact_absolute_sentinel(
     assert not read_commands[0].endswith("../protected.txt")
 
 
+def test_native_mutation_uses_reserved_errno_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    created: list[_CommandRoutingExecutor] = []
+
+    class RecordingExecutor(_CommandRoutingExecutor):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            created.append(self)
+
+    monkeypatch.setattr(probe_module, "BashExecutor", RecordingExecutor)
+
+    report = run_sandbox_probe(sandbox_mode="sandbox-exec")
+
+    assert _check(report, "outside_write").passed is True
+    mutation = next(
+        command
+        for command in created[0].commands
+        if "protected.txt" in command and not command.startswith("cat ")
+    )
+    assert "python3 -c" in mutation
+    assert "errno.EPERM" in mutation
+    assert "errno.EACCES" in mutation
+    assert "errno.EROFS" in mutation
+    assert "sys.exit(75)" in mutation
+
+
+def test_native_mutation_source_returns_zero_after_successful_write(tmp_path: Path):
+    target = tmp_path / "protected.txt"
+    target.write_text("protected\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, "-c", probe_module._native_mutation_source(target)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert target.read_text(encoding="utf-8") == "tampered\n"
+
+
+def test_native_mutation_source_uses_distinct_exit_for_unrelated_oserror(
+    tmp_path: Path,
+):
+    target = tmp_path / "missing" / "protected.txt"
+
+    completed = subprocess.run(
+        [sys.executable, "-c", probe_module._native_mutation_source(target)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 76
+    assert "mutation-error:FileNotFoundError" in completed.stdout
+
+
 @pytest.mark.parametrize(
     ("returncode", "exception_info"),
     [(-1, ""), (1, "ExecutorFailure"), (-1, "TimeoutExpired")],
@@ -352,6 +418,20 @@ def test_native_outside_write_rejects_nonordinary_executor_results(
         mutation_exception = exception_info
 
     monkeypatch.setattr(probe_module, "BashExecutor", FailedMutationExecutor)
+
+    report = run_sandbox_probe(sandbox_mode="sandbox-exec")
+
+    assert _check(report, "outside_write").passed is False
+
+
+@pytest.mark.parametrize("returncode", [125, 126, 127, 137])
+def test_native_outside_write_rejects_unrelated_positive_exit_codes(
+    monkeypatch: pytest.MonkeyPatch, returncode: int
+):
+    class UnrelatedFailureExecutor(_CommandRoutingExecutor):
+        mutation_returncode = returncode
+
+    monkeypatch.setattr(probe_module, "BashExecutor", UnrelatedFailureExecutor)
 
     report = run_sandbox_probe(sandbox_mode="sandbox-exec")
 
@@ -385,6 +465,42 @@ def test_docker_outside_write_requires_host_sentinel_invisibility(
     assert _check(report, "outside_write").passed is False
 
 
+def test_docker_root_readonly_uses_statvfs_reserved_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    created: list[_CommandRoutingExecutor] = []
+
+    class RecordingExecutor(_CommandRoutingExecutor):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            created.append(self)
+
+    monkeypatch.setattr(probe_module, "BashExecutor", RecordingExecutor)
+
+    report = run_sandbox_probe(sandbox_mode="docker")
+
+    assert _check(report, "outside_write").passed is True
+    readonly_command = next(
+        command for command in created[0].commands if "statvfs" in command
+    )
+    readonly_source = shlex.split(readonly_command)[2]
+    assert "os.statvfs('/')" in readonly_source
+    assert "os.ST_RDONLY" in readonly_source
+    assert "sys.exit(75)" in readonly_source
+
+
+def test_docker_outside_detail_reports_mount_flag_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(probe_module, "BashExecutor", _CommandRoutingExecutor)
+
+    report = run_sandbox_probe(sandbox_mode="docker")
+
+    detail = _check(report, "outside_write").detail
+    assert "read-only root mount verified" in detail
+    assert "write denied" not in detail
+
+
 @pytest.mark.parametrize(
     ("returncode", "exception_info"),
     [(-1, ""), (1, "ExecutorFailure"), (-1, "TimeoutExpired")],
@@ -398,6 +514,20 @@ def test_docker_outside_write_rejects_nonordinary_root_write_results(
         mutation_exception = exception_info
 
     monkeypatch.setattr(probe_module, "BashExecutor", FailedMutationExecutor)
+
+    report = run_sandbox_probe(sandbox_mode="docker")
+
+    assert _check(report, "outside_write").passed is False
+
+
+@pytest.mark.parametrize("returncode", [125, 126, 127, 137])
+def test_docker_root_readonly_rejects_unrelated_positive_exit_codes(
+    monkeypatch: pytest.MonkeyPatch, returncode: int
+):
+    class UnrelatedFailureExecutor(_CommandRoutingExecutor):
+        mutation_returncode = returncode
+
+    monkeypatch.setattr(probe_module, "BashExecutor", UnrelatedFailureExecutor)
 
     report = run_sandbox_probe(sandbox_mode="docker")
 
@@ -421,7 +551,7 @@ def test_probe_uses_var_tmp_for_sentinel_and_tmp_for_controlled_socket(
 
     run_sandbox_probe(sandbox_mode="docker")
 
-    assert selected_dirs == ["/var/tmp", "/tmp"]
+    assert selected_dirs == [str(Path("/var/tmp").resolve()), "/tmp"]
 
 
 def test_verified_host_temp_base_fails_closed_when_candidate_is_unavailable(
@@ -430,6 +560,21 @@ def test_verified_host_temp_base_fails_closed_when_candidate_is_unavailable(
     missing = tmp_path / "missing"
 
     assert probe_module._verified_host_temp_base(missing) is None
+
+
+def test_verified_host_temp_base_rejects_symlink_into_masked_tmp(tmp_path: Path):
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw_masked:
+        alias = tmp_path / "masked-alias"
+        alias.symlink_to(raw_masked, target_is_directory=True)
+
+        assert probe_module._verified_host_temp_base(alias) is None
+
+
+def test_verified_host_temp_base_returns_canonical_candidate(tmp_path: Path):
+    alias = tmp_path / "var-tmp-alias"
+    alias.symlink_to("/var/tmp", target_is_directory=True)
+
+    assert probe_module._verified_host_temp_base(alias) == Path("/var/tmp").resolve()
 
 
 def test_probe_reports_clear_failure_when_verified_host_temp_is_unavailable(
@@ -446,15 +591,17 @@ def test_probe_reports_clear_failure_when_verified_host_temp_is_unavailable(
 
 
 def test_verified_host_temp_base_cleans_up_after_writability_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ):
     def fail_write(_fd: int, _data: bytes) -> int:
         raise OSError("injected write failure")
 
-    monkeypatch.setattr(probe_module.os, "write", fail_write)
+    with tempfile.TemporaryDirectory(dir="/var/tmp") as raw_candidate:
+        candidate = Path(raw_candidate)
+        monkeypatch.setattr(probe_module.os, "write", fail_write)
 
-    assert probe_module._verified_host_temp_base(tmp_path) is None
-    assert list(tmp_path.iterdir()) == []
+        assert probe_module._verified_host_temp_base(candidate) is None
+        assert list(candidate.iterdir()) == []
 
 
 def test_combined_network_detail_respects_report_length_limit(
