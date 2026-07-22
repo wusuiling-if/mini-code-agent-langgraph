@@ -6,7 +6,9 @@ from mini_code_agent.checks import (
     MAX_VERIFICATION_CHECKS,
     VerificationCheck,
     VerificationCheckEvidence,
+    VerificationCheckExecution,
     normalize_verification_checks,
+    run_verification_matrix,
 )
 from mini_code_agent.contracts import ToolResult
 
@@ -77,3 +79,121 @@ def test_tool_result_observation_contains_only_structured_check_evidence():
     assert "ruff check" not in str(observation)
     assert "verification_boundary_checked" not in str(observation)
     assert "private-fingerprint" not in str(observation)
+
+
+def _execution(
+    check: VerificationCheck,
+    returncode: int = 0,
+    *,
+    exception_info: str = "",
+) -> VerificationCheckExecution:
+    return VerificationCheckExecution(
+        evidence=VerificationCheckEvidence(
+            name=check.name,
+            returncode=returncode,
+            duration_ms=1,
+            exception_info=exception_info,
+        ),
+        output=f"{check.name} output",
+    )
+
+
+def test_matrix_runs_all_ordinary_results_on_one_fingerprint():
+    checks = (
+        VerificationCheck("tests", "pytest -q"),
+        VerificationCheck("lint", "ruff check ."),
+        VerificationCheck("types", "pyright"),
+    )
+    calls: list[str] = []
+
+    result = run_verification_matrix(
+        checks,
+        capture_fingerprint=lambda: "stable",
+        execute_check=lambda check: (
+            calls.append(check.name)
+            or _execution(check, 1 if check.name == "lint" else 0)
+        ),
+    )
+
+    assert calls == ["tests", "lint", "types"]
+    assert result.returncode == 1
+    assert result.exception_info == "VerificationCheckFailed"
+    assert [item.name for item in result.verification_checks] == [
+        "tests",
+        "lint",
+        "types",
+    ]
+
+
+def test_successful_matrix_carries_its_internal_fingerprint():
+    check = VerificationCheck("tests", "pytest -q")
+
+    result = run_verification_matrix(
+        (check,),
+        capture_fingerprint=lambda: "stable",
+        execute_check=_execution,
+    )
+
+    assert result.returncode == 0
+    assert result.verification_fingerprint == "stable"
+
+
+def test_matrix_stops_when_a_check_changes_the_workspace():
+    fingerprints = iter(("f0", "f0", "changed"))
+    calls: list[str] = []
+    checks = (
+        VerificationCheck("tests", "pytest -q"),
+        VerificationCheck("lint", "ruff check ."),
+    )
+
+    result = run_verification_matrix(
+        checks,
+        capture_fingerprint=lambda: next(fingerprints),
+        execute_check=lambda check: calls.append(check.name) or _execution(check),
+    )
+
+    assert calls == ["tests"]
+    assert result.returncode == -1
+    assert result.exception_info == "WorkspaceChangedDuringVerification"
+    assert "tests" in result.output
+
+
+def test_matrix_fails_closed_when_fingerprinting_raises():
+    def fail_capture() -> str:
+        raise OSError("private path detail")
+
+    result = run_verification_matrix(
+        (VerificationCheck("tests", "pytest -q"),),
+        capture_fingerprint=fail_capture,
+        execute_check=_execution,
+    )
+
+    assert result.returncode == -1
+    assert result.exception_info == "WorkspaceFingerprintError"
+    assert "private path detail" not in result.output
+
+
+def test_matrix_stops_on_infrastructure_error_but_not_zero_tests():
+    calls: list[str] = []
+    checks = (
+        VerificationCheck("tests", "pytest -q"),
+        VerificationCheck("lint", "ruff check ."),
+        VerificationCheck("types", "pyright"),
+    )
+
+    def execute(check: VerificationCheck) -> VerificationCheckExecution:
+        calls.append(check.name)
+        if check.name == "tests":
+            return _execution(check, 1, exception_info="NoTestsCollected")
+        if check.name == "lint":
+            return _execution(check, -1, exception_info="TimeoutExpired")
+        return _execution(check)
+
+    result = run_verification_matrix(
+        checks,
+        capture_fingerprint=lambda: "stable",
+        execute_check=execute,
+    )
+
+    assert calls == ["tests", "lint"]
+    assert result.exception_info == "TimeoutExpired"
