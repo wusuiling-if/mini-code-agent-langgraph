@@ -936,11 +936,12 @@ class BashExecutor:
                 executable,
                 "--die-with-parent",
                 "--new-session",
-                "--unshare-net",
-                "--unshare-pid",
+                "--unshare-all",
                 "--ro-bind",
                 "/",
                 "/",
+                "--tmpfs",
+                "/run",
                 "--dev",
                 "/dev",
                 "--proc",
@@ -1003,6 +1004,26 @@ class BashExecutor:
                 "2",
                 "--tmpfs",
                 "/tmp:rw,noexec,nosuid,size=256m",
+                *(
+                    [
+                        "--user",
+                        f"{os.getuid()}:{os.getgid()}",
+                        "--env",
+                        "HOME=/tmp",
+                        "--env",
+                        "TMPDIR=/tmp",
+                        "--env",
+                        "PYTHONDONTWRITEBYTECODE=1",
+                        "--env",
+                        "GIT_CONFIG_GLOBAL=/dev/null",
+                        "--env",
+                        "GIT_CONFIG_NOSYSTEM=1",
+                        "--env",
+                        "GIT_TERMINAL_PROMPT=0",
+                    ]
+                    if os.name == "posix"
+                    else []
+                ),
                 "--mount",
                 f"type=bind,src={self.cwd},dst=/workspace",
                 "-w",
@@ -1031,9 +1052,7 @@ class BashExecutor:
             f'(allow file-read* (subpath "{runtime}")) '
             '(deny file-write*) '
             f'(allow file-write* (subpath "{cwd}")) '
-            f'(allow file-write* (subpath "{runtime}")) '
-            '(allow file-write* (subpath "/private/tmp")) '
-            '(allow file-write* (subpath "/tmp"))'
+            f'(allow file-write* (subpath "{runtime}"))'
         )
 
     def _selected_sandbox_mode(self) -> str:

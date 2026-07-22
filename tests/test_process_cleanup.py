@@ -114,3 +114,22 @@ def test_docker_runs_receive_unique_names_and_cidfiles(
     assert first_cidfile != second_cidfile
     assert first_name.startswith("mca-")
     assert first_cidfile.endswith(".cid")
+
+
+def test_docker_runs_as_the_invoking_user_with_private_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executor = BashExecutor(tmp_path, sandbox_mode="docker")
+    monkeypatch.setattr(
+        executor,
+        "_trusted_executable",
+        lambda name: "/usr/bin/docker" if name == "docker" else "",
+    )
+    monkeypatch.setattr(os, "getuid", lambda: 1234)
+    monkeypatch.setattr(os, "getgid", lambda: 5678)
+
+    argv = executor._sandboxed_argv(["python3", "--version"])
+
+    assert argv[argv.index("--user") + 1] == "1234:5678"
+    assert "HOME=/tmp" in argv
+    assert "TMPDIR=/tmp" in argv

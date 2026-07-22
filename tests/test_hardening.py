@@ -49,6 +49,29 @@ def tool_call(name: str, call_id: str, args: dict | None = None) -> dict:
     }
 
 
+def test_bwrap_uses_private_runtime_namespaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executor = BashExecutor(tmp_path, sandbox_mode="bwrap")
+    monkeypatch.setattr(
+        executor,
+        "_trusted_executable",
+        lambda name: "/usr/bin/bwrap" if name == "bwrap" else "",
+    )
+
+    argv = executor._sandboxed_argv(["/bin/sh", "-c", ":"])
+
+    assert "--unshare-all" in argv
+    assert argv[argv.index("--tmpfs", argv.index("--unshare-all")) + 1] == "/run"
+
+
+def test_macos_profile_does_not_allow_shared_tmp_writes(tmp_path: Path) -> None:
+    profile = BashExecutor(tmp_path, sandbox_mode="sandbox-exec")._sandbox_profile()
+
+    assert '(allow file-write* (subpath "/tmp"))' not in profile
+    assert '(allow file-write* (subpath "/private/tmp"))' not in profile
+
+
 def test_verification_fingerprint_covers_modes_symlinks_and_dependency_dirs(
     tmp_path: Path,
 ):
