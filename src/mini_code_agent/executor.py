@@ -39,6 +39,7 @@ MAX_COMMAND_OUTPUT_BYTES = 2 * 1024 * 1024
 MAX_STRUCTURED_EDIT_CHARS = 8 * 1024 * 1024
 PROCESS_TERMINATION_GRACE_SECONDS = 0.5
 DOCKER_CLEANUP_TIMEOUT_SECONDS = 5
+DOCKER_WRAPPER_FAILURE_CODES = frozenset({125, 126, 127})
 
 DANGEROUS_COMMAND_PATTERNS = [
     re.compile(r"(^|[;&|]\s*)rm\s+.*-[^\n]*[rf][^\n]*\s+(/|\$HOME|~)(\s|$)"),
@@ -86,6 +87,19 @@ class _DockerRunMetadata:
     executable: str
     name: str
     cidfile: Path
+
+
+class SandboxExecutionError(RuntimeError):
+    """A sandbox wrapper failed before ordinary command results were available."""
+
+    def __init__(
+        self, backend: str, returncode: int, output: str
+    ) -> None:
+        super().__init__(
+            f"{backend} sandbox lifecycle failed with exit code {returncode}"
+        )
+        self.returncode = returncode
+        self.output = output
 
 
 class _TerminationSignal(BaseException):
@@ -984,6 +998,13 @@ class BashExecutor:
                 )
             if process is None:
                 raise RuntimeError("command process was not started")
+            if (
+                docker_run is not None
+                and process.returncode in DOCKER_WRAPPER_FAILURE_CODES
+            ):
+                raise SandboxExecutionError(
+                    "docker", process.returncode, stdout
+                )
         return subprocess.CompletedProcess(argv, process.returncode, stdout)
 
     @staticmethod
