@@ -67,7 +67,7 @@ def git_diff(path: str = "") -> str:
 
 @tool
 def run_tests() -> str:
-    """Run the user-configured repository test command in the project directory."""
+    """Run every user-configured authoritative verification check."""
     raise RuntimeError("The LangGraph tools node executes run_tests calls.")
 
 

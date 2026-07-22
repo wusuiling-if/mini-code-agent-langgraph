@@ -217,6 +217,107 @@ class VerificationGateModel:
         )
 
 
+class MatrixModel:
+    def __init__(self):
+        self.step = 0
+
+    def bind_tools(self, tools):
+        return self
+
+    def invoke(self, messages):
+        self.step += 1
+        name, args = {
+            1: ("run_tests", {}),
+            2: ("submit", {"summary": "matrix verified"}),
+        }[self.step]
+        return AIMessage(
+            content=name,
+            tool_calls=[
+                {
+                    "name": name,
+                    "args": args,
+                    "id": f"matrix-{self.step}",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+
+def test_agent_persists_redacted_matrix_evidence_and_submits(tmp_path: Path):
+    trajectory_path = tmp_path / "run.json"
+    tests_command = (
+        f"{shlex.quote(sys.executable)} -c 'print(\"Ran 2 tests\")'"
+    )
+    lint_command = (
+        f"{shlex.quote(sys.executable)} -c 'print(\"clean\")'"
+    )
+    agent = MiniCodeAgent(
+        MatrixModel(),
+        BashExecutor(
+            tmp_path,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            verification_checks=(
+                VerificationCheck("tests", tests_command),
+                VerificationCheck("lint", lint_command),
+            ),
+        ),
+        trajectory_path=trajectory_path,
+        quiet=True,
+    )
+
+    trajectory = agent.run("verify")
+    event = next(
+        item for item in trajectory["events"] if item.get("tool") == "run_tests"
+    )
+
+    assert trajectory["exit_status"] == "Submitted"
+    assert [item["name"] for item in event["verification_checks"]] == [
+        "tests",
+        "lint",
+    ]
+    rendered = trajectory_path.read_text(encoding="utf-8")
+    assert tests_command not in rendered
+    assert lint_command not in rendered
+    assert "_verification_ignore_paths" not in rendered
+    assert "verification_fingerprint" not in rendered
+
+
+def test_chat_event_contains_only_redacted_matrix_evidence(tmp_path: Path):
+    tests_command = (
+        f"{shlex.quote(sys.executable)} -c 'print(\"Ran 2 tests\")'"
+    )
+    lint_command = (
+        f"{shlex.quote(sys.executable)} -c 'print(\"clean\")'"
+    )
+    session = ConversationalCodeAgent(
+        MatrixModel(),
+        BashExecutor(
+            tmp_path,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            verification_checks=(
+                VerificationCheck("tests", tests_command),
+                VerificationCheck("lint", lint_command),
+            ),
+        ),
+        quiet=True,
+    )
+
+    result = session.respond_turn("verify", coding_mode=True)
+    event = next(
+        item for item in session.events if item.get("tool") == "run_tests"
+    )
+
+    assert result.status == "submitted"
+    assert [item["name"] for item in event["verification_checks"]] == [
+        "tests",
+        "lint",
+    ]
+    assert tests_command not in str(event)
+    assert lint_command not in str(event)
+
+
 def test_agent_blocks_submit_until_latest_edit_is_verified(tmp_path: Path):
     (tmp_path / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
     agent = MiniCodeAgent(

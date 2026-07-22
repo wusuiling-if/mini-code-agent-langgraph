@@ -130,6 +130,51 @@ def test_run_mode_cannot_submit_without_authoritative_verification(tmp_path: Pat
     assert outcome.calls[0].result.exception_info == "VerificationRequired"
 
 
+def test_matrix_pass_then_edit_in_one_batch_blocks_submit(tmp_path: Path):
+    (tmp_path / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
+    executor = BashExecutor(
+        tmp_path,
+        approval_mode="yolo",
+        sandbox_mode="none",
+        verification_checks=(
+            VerificationCheck(
+                "tests",
+                f"{shlex.quote(sys.executable)} -c 'print(\"Ran 1 test\")'",
+            ),
+        ),
+    )
+    baseline = capture_workspace_fingerprint(executor)
+    gate = VerificationGate.create(baseline, require_verification=True)
+
+    outcome = execute_tool_batch(
+        executor,
+        [
+            {"name": "run_tests", "args": {}, "id": "checks"},
+            {
+                "name": "apply_patch",
+                "args": {
+                    "path": "value.py",
+                    "old": "VALUE = 1",
+                    "new": "VALUE = 2",
+                },
+                "id": "edit",
+            },
+            {
+                "name": "submit",
+                "args": {"summary": "too early"},
+                "id": "submit",
+            },
+        ],
+        gate,
+    )
+    results = {call.tool_call_id: call.result for call in outcome.calls}
+
+    assert results["checks"].returncode == 0
+    assert results["edit"].returncode == 0
+    assert results["submit"].blocked is True
+    assert results["submit"].exception_info == "VerificationRequired"
+
+
 class FailedTestThenProseModel:
     def __init__(self):
         self.calls = 0
@@ -867,6 +912,85 @@ def test_run_checkpoint_can_resume_from_last_safe_boundary(
     assert resumed["exit_status"] == "Submitted"
     assert resumed["resumable"] is False
     assert resumed["steps"] == 3
+
+
+def test_resume_discards_prior_matrix_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("MCA_STATE_DIR", str(tmp_path / "state"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
+    trajectory_path = tmp_path / "resume.json"
+    check = VerificationCheck(
+        "tests",
+        f"{shlex.quote(sys.executable)} -c 'print(\"Ran 1 test\")'",
+    )
+
+    class CheckOnceModel:
+        def bind_tools(self, tools):
+            return self
+
+        def invoke(self, messages):
+            return AIMessage(
+                content="verify",
+                tool_calls=[tool_call("run_tests", "initial-check")],
+            )
+
+    class CheckThenSubmitModel:
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, tools):
+            return self
+
+        def invoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(
+                    content="verify again",
+                    tool_calls=[tool_call("run_tests", "fresh-check")],
+                )
+            return AIMessage(
+                content="submit",
+                tool_calls=[tool_call("submit", "submit")],
+            )
+
+    first = MiniCodeAgent(
+        CheckOnceModel(),
+        BashExecutor(
+            repo,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            verification_checks=(check,),
+        ),
+        max_steps=1,
+        trajectory_path=trajectory_path,
+        quiet=True,
+    ).run("verify")
+    checkpoint_steps = first["steps"]
+
+    resumed = MiniCodeAgent(
+        CheckThenSubmitModel(),
+        BashExecutor(
+            repo,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            verification_checks=(check,),
+        ),
+        max_steps=3,
+        trajectory_path=trajectory_path,
+        quiet=True,
+    ).run(resume_data=load_trajectory(trajectory_path))
+    fresh_checks = [
+        event
+        for event in resumed["events"]
+        if event.get("tool") == "run_tests"
+        and int(event.get("step", 0)) > checkpoint_steps
+    ]
+
+    assert len(fresh_checks) == 1
+    assert resumed["exit_status"] == "Submitted"
 
 
 class CountingChatModel:
