@@ -15,6 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from mini_code_agent import __version__
+from mini_code_agent.checks import (
+    VerificationCheck,
+    normalize_verification_checks,
+)
 
 
 # These nullable seams keep CLI imports lightweight while preserving the
@@ -90,8 +94,8 @@ class ChatAccessController:
             return _load_tool_result()(
                 tool=name,
                 output=(
-                    f"{name} requires an authoritative test command. Restart with "
-                    "--test-command '<command>'."
+                    f"{name} requires an authoritative verification check. Restart with "
+                    "--test-command '<command>' or --check NAME '<command>'."
                 ),
                 returncode=-1,
                 duration_ms=0,
@@ -145,6 +149,24 @@ def _non_empty_command(value: str) -> str:
     if not command:
         raise argparse.ArgumentTypeError("must not be blank")
     return command
+
+
+def _configured_verification_checks(
+    args: argparse.Namespace, *, required: bool
+) -> tuple[tuple[VerificationCheck, ...], tuple[VerificationCheck, ...]]:
+    explicit = tuple(
+        VerificationCheck(name, command)
+        for name, command in (getattr(args, "checks", None) or ())
+    )
+    combined = normalize_verification_checks(
+        getattr(args, "test_command", None), explicit
+    )
+    if required and not combined:
+        raise RuntimeError(
+            "configure --test-command '<command>' or at least one "
+            "--check NAME '<command>'"
+        )
+    return combined, explicit
 
 
 def _state_root() -> Path:
@@ -297,8 +319,17 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--test-command",
         type=_non_empty_command,
-        required=True,
+        default=None,
         help="Default command for run_tests.",
+    )
+    run.add_argument(
+        "--check",
+        dest="checks",
+        action="append",
+        nargs=2,
+        metavar=("NAME", "COMMAND"),
+        default=[],
+        help="Add a named authoritative verification check; repeatable.",
     )
     run.add_argument(
         "--allow-zero-tests",
@@ -356,6 +387,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=_non_empty_command,
         default=None,
         help="Configure authoritative test verification and enable /code mode.",
+    )
+    chat.add_argument(
+        "--check",
+        dest="checks",
+        action="append",
+        nargs=2,
+        metavar=("NAME", "COMMAND"),
+        default=[],
+        help="Add a named authoritative verification check; repeatable.",
     )
     chat.add_argument(
         "--allow-zero-tests",
@@ -449,6 +489,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_agent(args: argparse.Namespace) -> int:
+    _combined_checks, explicit_checks = _configured_verification_checks(
+        args, required=True
+    )
     if args.model == "mock":
         raise RuntimeError(
             "The scripted mock is not a general coding model; use `mca demo` for the no-key demo."
@@ -476,6 +519,7 @@ def run_agent(args: argparse.Namespace) -> int:
         approval_mode="yolo" if auto_approve else "confirm",
         allow_shell=args.allow_shell,
         default_test_command=args.test_command,
+        verification_checks=explicit_checks,
         allow_zero_tests=args.allow_zero_tests,
         sandbox_mode=args.sandbox,
         docker_image=args.docker_image
@@ -508,6 +552,10 @@ def run_agent(args: argparse.Namespace) -> int:
 
 
 def chat_command(args: argparse.Namespace) -> int:
+    combined_checks, explicit_checks = _configured_verification_checks(
+        args, required=False
+    )
+    coding_enabled = bool(combined_checks)
     from mini_code_agent.trajectory import load_trajectory
 
     if not sys.stdin.isatty():
@@ -529,16 +577,17 @@ def chat_command(args: argparse.Namespace) -> int:
         approval_mode="yolo" if args.yes else "confirm",
         allow_shell=args.allow_shell,
         default_test_command=args.test_command,
+        verification_checks=explicit_checks,
         allow_zero_tests=args.allow_zero_tests,
         sandbox_mode=args.sandbox,
         docker_image=args.docker_image
         or os.getenv("MCA_DOCKER_IMAGE", "python:3.11-slim"),
     )
     model = _model_from_args(args)
-    if args.test_command is not None:
+    if coding_enabled:
         _require_working_sandbox(executor)
     output = _resume_output_path(args.resume, args.output, "chat")
-    access = ChatAccessController(executor, coding_enabled=args.test_command is not None)
+    access = ChatAccessController(executor, coding_enabled=coding_enabled)
     session = _load_conversational_code_agent()(
         model,
         access,
@@ -572,11 +621,11 @@ def chat_command(args: argparse.Namespace) -> int:
                 continue
             command, separator, remainder = user_text.partition(" ")
             if command in {"/ask", "/code"}:
-                if command == "/code" and args.test_command is None:
+                if command == "/code" and not coding_enabled:
                     access.mode = "ask"
                     print(
                         "/code is unavailable: restart with --test-command '<command>' "
-                        "to enable coding. Staying in /ask mode."
+                        "or --check NAME '<command>' to enable coding. Staying in /ask mode."
                     )
                     continue
                 access.mode = command.removeprefix("/")

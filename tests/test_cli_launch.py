@@ -119,13 +119,93 @@ def test_mock_model_does_not_import_provider_adapters():
     assert modules.isdisjoint({"langchain_openai", "langchain_deepseek"})
 
 
-def test_run_requires_explicit_model_and_test_command():
+def test_parser_accepts_named_checks_and_preserves_order():
+    args = cli_module.build_parser().parse_args(
+        [
+            "run",
+            "task",
+            "--model",
+            "deepseek",
+            "--check",
+            "tests",
+            "pytest -q",
+            "--check",
+            "lint",
+            "ruff check .",
+        ]
+    )
+
+    combined, explicit = cli_module._configured_verification_checks(
+        args, required=True
+    )
+
+    assert [(item.name, item.command) for item in combined] == [
+        ("tests", "pytest -q"),
+        ("lint", "ruff check ."),
+    ]
+    assert explicit == combined
+
+
+def test_cli_combines_legacy_test_first_and_rejects_duplicate_tests():
+    parser = cli_module.build_parser()
+    args = parser.parse_args(
+        [
+            "run",
+            "task",
+            "--model",
+            "deepseek",
+            "--test-command",
+            "pytest -q",
+            "--check",
+            "lint",
+            "ruff check .",
+        ]
+    )
+    combined, explicit = cli_module._configured_verification_checks(
+        args, required=True
+    )
+    assert [item.name for item in combined] == ["tests", "lint"]
+    assert [item.name for item in explicit] == ["lint"]
+
+    duplicate = parser.parse_args(
+        [
+            "run",
+            "task",
+            "--model",
+            "deepseek",
+            "--test-command",
+            "pytest -q",
+            "--check",
+            "tests",
+            "other",
+        ]
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        cli_module._configured_verification_checks(duplicate, required=True)
+
+
+def test_run_requires_model_at_parse_time_and_verification_at_runtime():
     parser = cli_module.build_parser()
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["run", "task", "--model", "deepseek"])
-    with pytest.raises(SystemExit):
-        parser.parse_args(["run", "task", "--test-command", "pytest -q"])
+        parser.parse_args(["run", "task", "--check", "tests", "pytest -q"])
+
+    args = parser.parse_args(["run", "task", "--model", "deepseek"])
+    with pytest.raises(RuntimeError, match="--check"):
+        cli_module._configured_verification_checks(args, required=True)
+
+
+def test_chat_named_check_enables_coding_configuration():
+    args = cli_module.build_parser().parse_args(
+        ["chat", "--check", "tests", "pytest -q"]
+    )
+
+    combined, explicit = cli_module._configured_verification_checks(
+        args, required=False
+    )
+
+    assert combined
+    assert explicit[0].name == "tests"
 
 
 def test_run_rejects_scripted_mock_before_runtime_setup():

@@ -304,6 +304,156 @@ def test_chat_cli_prints_structured_turn_and_returns_to_ask_after_submit(
     assert created["closed"] is True
 
 
+def test_run_agent_passes_named_checks_to_the_executor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    created: dict[str, object] = {}
+
+    class FakeExecutor:
+        def __init__(self, cwd: Path, **kwargs):
+            self.cwd = Path(cwd)
+            created["executor_kwargs"] = kwargs
+
+    class FakeAgent:
+        def __init__(self, model, executor, **kwargs):
+            created["agent_executor"] = executor
+
+        def run(self, task: str, *, resume_data=None):
+            return {
+                "exit_status": "Submitted",
+                "workspace_changes": {
+                    "created": [],
+                    "deleted": [],
+                    "modified": [],
+                },
+                "sandbox": "disabled",
+                "submission": "",
+                "events": [],
+            }
+
+    monkeypatch.setattr(cli_module, "_load_runtime_env", lambda _path: None)
+    monkeypatch.setattr(cli_module, "_model_from_args", lambda _args: object())
+    monkeypatch.setattr(
+        cli_module, "_require_working_sandbox", lambda _executor: None
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_resume_output_path",
+        lambda _resume, _output, _kind: tmp_path / "run.json",
+    )
+    monkeypatch.setattr(cli_module, "_load_bash_executor", lambda: FakeExecutor)
+    monkeypatch.setattr(cli_module, "_load_mini_code_agent", lambda: FakeAgent)
+
+    args = build_parser().parse_args(
+        [
+            "run",
+            "task",
+            "--cwd",
+            str(tmp_path),
+            "--model",
+            "deepseek",
+            "--check",
+            "tests",
+            "pytest -q",
+            "--check",
+            "lint",
+            "ruff check .",
+            "--yes",
+            "--sandbox",
+            "none",
+            "--allow-dirty",
+        ]
+    )
+
+    assert cli_module.run_agent(args) == 0
+    kwargs = created["executor_kwargs"]
+    assert kwargs["default_test_command"] is None
+    assert [item.name for item in kwargs["verification_checks"]] == [
+        "tests",
+        "lint",
+    ]
+
+
+def test_chat_command_named_check_enables_code_and_sandbox_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    created: dict[str, object] = {}
+    sandbox_probes: list[object] = []
+
+    class FakeExecutor:
+        def __init__(self, cwd: Path, **kwargs):
+            self.cwd = Path(cwd)
+            created["executor"] = self
+            created["executor_kwargs"] = kwargs
+
+    class FakeSession:
+        def __init__(self, model, executor, **kwargs):
+            created["access"] = executor
+
+        def respond_turn(self, user_text: str, *, coding_mode: bool):
+            created["turn"] = (user_text, coding_mode)
+            return TurnResult(
+                text="done",
+                status="submitted",
+                completed=True,
+                verified=True,
+                steps=1,
+            )
+
+        def close(self):
+            created["closed"] = True
+
+    class TtyInput:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    inputs = iter(["/code fix it", "/exit"])
+    monkeypatch.setattr(cli_module.sys, "stdin", TtyInput())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
+    monkeypatch.setattr(cli_module, "_load_runtime_env", lambda _path: None)
+    monkeypatch.setattr(cli_module, "_model_from_args", lambda _args: object())
+    monkeypatch.setattr(cli_module, "_load_bash_executor", lambda: FakeExecutor)
+    monkeypatch.setattr(
+        cli_module, "_load_conversational_code_agent", lambda: FakeSession
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_require_working_sandbox",
+        sandbox_probes.append,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_resume_output_path",
+        lambda _resume, _output, _kind: tmp_path / "session.chat.json",
+    )
+    args = build_parser().parse_args(
+        [
+            "chat",
+            "--cwd",
+            str(tmp_path),
+            "--model",
+            "deepseek",
+            "--check",
+            "tests",
+            "pytest -q",
+            "--yes",
+            "--sandbox",
+            "none",
+            "--allow-dirty",
+        ]
+    )
+
+    assert cli_module.chat_command(args) == 0
+    kwargs = created["executor_kwargs"]
+    assert kwargs["default_test_command"] is None
+    assert [item.name for item in kwargs["verification_checks"]] == ["tests"]
+    assert sandbox_probes == [created["executor"]]
+    assert created["turn"][1] is True
+    assert created["access"]._coding_enabled is True
+    assert created["closed"] is True
+
+
 def test_chat_code_command_without_test_command_stays_in_ask_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
