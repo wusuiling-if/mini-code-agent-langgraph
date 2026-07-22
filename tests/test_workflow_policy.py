@@ -12,6 +12,7 @@ WORKFLOW_DIRECTORY = ROOT / ".github" / "workflows"
 EXPECTED_WORKFLOWS = {
     "codeql.yml",
     "release.yml",
+    "sandbox.yml",
     "supply-chain.yml",
     "tests.yml",
 }
@@ -319,6 +320,7 @@ def test_every_job_has_an_explicit_timeout():
         "supply-chain.yml": {"pip-audit": 15, "dependency-review": 15},
         "codeql.yml": {"analysis": 20},
         "release.yml": {"build": 20, "publish": 10},
+        "sandbox.yml": {"bwrap": 15, "docker": 15, "sandbox-exec": 15},
     }
     for workflow_name, expected_jobs in expected_timeouts.items():
         jobs = _job_blocks(_workflow(workflow_name))
@@ -378,6 +380,35 @@ def test_offline_eval_uploads_only_sanitized_json_for_seven_days():
     assert re.search(r"(?m)^          if-no-files-found:\s*error\s*$", upload_step)
     assert "trajectory" not in upload_step.lower()
     assert "workspace" not in upload_step.lower()
+
+
+def test_sandbox_workflow_exercises_real_backends_without_sensitive_artifacts():
+    workflow = _workflow("sandbox.yml")
+    jobs = _job_blocks(workflow)
+
+    assert set(jobs) == {"bwrap", "docker", "sandbox-exec"}
+    assert "sudo apt-get install -y bubblewrap" in jobs["bwrap"]
+    assert "docker pull python:3.11-slim" in jobs["docker"]
+    assert "runs-on: macos-latest" in jobs["sandbox-exec"]
+
+    for job_name, backend in (
+        ("bwrap", "bwrap"),
+        ("docker", "docker"),
+        ("sandbox-exec", "sandbox-exec"),
+    ):
+        job = jobs[job_name]
+        assert 'python -m pip install -e ".[dev]"' in job
+        assert (
+            f"MCA_SANDBOX_BACKEND={backend} python -m pytest "
+            "tests/test_sandbox_integration.py -q"
+        ) in job
+        assert f"mca sandbox probe --sandbox {backend}" in job
+
+    lowered = workflow.lower()
+    assert "actions/upload-artifact@" not in lowered
+    assert "${{ secrets." not in lowered
+    assert "workspace" not in lowered
+    assert "trajectory" not in lowered
 
 
 def test_dependabot_groups_weekly_pip_and_actions_updates():
