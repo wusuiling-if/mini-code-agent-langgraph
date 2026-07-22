@@ -214,12 +214,35 @@ def _assert_release_permissions_are_narrow(workflow: str) -> None:
     ) == JOB_PERMISSION_EXCEPTIONS[("release.yml", "publish")]
 
 
+def _assert_sandbox_triggers_are_exact(trigger_node: Node) -> None:
+    triggers = _node_mapping(trigger_node, "sandbox.yml triggers")
+    assert set(triggers) == {"push", "pull_request"}, (
+        "sandbox.yml must run only on push and pull_request"
+    )
+    for event in ("push", "pull_request"):
+        event_config = _node_mapping(
+            triggers[event], f"sandbox.yml {event} trigger"
+        )
+        assert set(event_config) == {"branches"}, (
+            f"sandbox.yml {event} trigger must only select branches"
+        )
+        branches = _node_sequence(
+            event_config["branches"], f"sandbox.yml {event} branches"
+        )
+        assert len(branches) == 1
+        branch = branches[0]
+        assert isinstance(branch, ScalarNode)
+        assert branch.tag == "tag:yaml.org,2002:str"
+        assert branch.value == "main"
+
+
 def _sandbox_jobs(workflow: str) -> dict[str, dict[str, Node]]:
     root, job_nodes = _workflow_nodes(workflow, "sandbox.yml")
     assert set(root) == {"name", "on", "permissions", "concurrency", "jobs"}, (
         "sandbox.yml root keys must match the approved structure"
     )
     assert _scalar_value(root["name"], "sandbox.yml name") == "sandbox"
+    _assert_sandbox_triggers_are_exact(root["on"])
     assert set(job_nodes) == set(SANDBOX_JOB_POLICY)
     return {
         job_name: _node_mapping(job_node, f"sandbox.yml job {job_name}")
@@ -595,6 +618,43 @@ def test_sandbox_policy_rejects_checkout_with_persisted_credentials():
 def test_sandbox_policy_rejects_root_execution_overrides(override):
     workflow = _workflow("sandbox.yml")
     mutated = workflow.replace("name: sandbox\n", f"name: sandbox\n{override}", 1)
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
+        _assert_sandbox_workflow_is_hardened(mutated)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        (
+            "on:\n"
+            "  push:\n"
+            "    branches: [main]\n"
+            "  pull_request:\n"
+            "    branches: [main]\n",
+            "on: workflow_dispatch\n",
+        ),
+        (
+            "  pull_request:\n    branches: [main]\n",
+            "  pull_request:\n"
+            "    branches: [main]\n"
+            "  workflow_dispatch:\n",
+        ),
+        (
+            "  push:\n    branches: [main]\n",
+            "  push:\n    branches: [main]\n    if: false\n",
+        ),
+        (
+            "    branches: [main]\n",
+            '    branches: ["${{ github.ref }}"]\n',
+        ),
+    ],
+    ids=("workflow-dispatch", "extra-trigger", "trigger-if", "branch-expression"),
+)
+def test_sandbox_policy_rejects_nonstandard_triggers(original, replacement):
+    workflow = _workflow("sandbox.yml")
+    mutated = workflow.replace(original, replacement, 1)
     assert mutated != workflow
 
     with pytest.raises(AssertionError):
