@@ -2,9 +2,9 @@
 
 [English](README.md)
 
-> **A compact, security-first LangGraph coding agent with verified patches, crash recovery, and HMAC-authenticated undo.**
+> **一个小型事务型 Coding Agent Runtime：隔离、验证、认证，再提交。**
 
-一个面向学习、审计与扩展的安全优先 LangGraph 编程 Agent：既能执行一次性编码任务，也能在持续会话中聊天、读代码、修改文件和运行验证。它是单进程的**行式 CLI / REPL**，不是全屏 TUI；“compact”描述部署与理解成本，不代表它拥有极小的第三方依赖栈。
+项目现在专攻一个机制：让 Agent 在隔离 Git 事务中修改代码，把补丁与验证证据绑定，并且只有显式、无冲突的 commit 才能更新源工作区。LangGraph 是随附的 Agent Loop 适配器，不是事务内核本身。界面仍是单进程的行式 CLI / REPL，而不是全屏 TUI。
 
 [![tests](https://github.com/wusuiling-if/mini-code-agent-langgraph/actions/workflows/tests.yml/badge.svg)](https://github.com/wusuiling-if/mini-code-agent-langgraph/actions/workflows/tests.yml)
 [![Python 3.10–3.13 tested](https://img.shields.io/badge/Python_tested-3.10%E2%80%933.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -26,7 +26,7 @@ mca doctor --cwd /path/to/repo --sandbox auto --provider auto
 mca sandbox probe --sandbox auto
 ```
 
-这条无 Key 诊断会把 provider 记为 warning 而不是失败。`mca demo` 当前支持 macOS、Linux 与 WSL2；原生 Windows 请使用 WSL2/Linux 环境运行完整 Agent。
+这条无 Key 诊断会把 provider 记为 warning 而不是失败。`mca demo` 支持 macOS、Linux 和原生 Windows；Windows 项目若依赖 POSIX 命令，可继续使用 WSL2。
 
 `doctor` 只静态检查 sandbox 可执行文件是否在 PATH。`run` 和启用了编码能力的 `chat` 会话会在启动时执行权威后端启动检查；这里“启用编码能力”指启动时传入了 `--test-command` 或 `--check`。未提供这两种验证形式的纯 `/ask` 会话会跳过该检查，因为它不能运行测试、shell 或编码工具。`doctor` 只检查当前进程环境中是否存在 provider key，不会打印 key 值；对于私有 env 文件，它只检查元数据而不会打开文件。
 
@@ -38,9 +38,10 @@ mca sandbox probe --sandbox auto
 | --- | --- | --- |
 | 只读聊天 | `/ask` 只允许列目录、搜索、读文件和查看 diff；新增工具不会自动获得权限 | `/code` 是用户显式授予的编码能力，不代表模型输出一定正确 |
 | 验证门 | 修改后只有当前工作区指纹对应的权威验证通过，才允许 `submit`；识别到 0 个测试时默认拒绝 | 验证命令和测试覆盖率由用户负责配置；`--allow-zero-tests` 会显式削弱该门禁 |
+| 事务执行 | `mca tx` 在隔离 Git worktree 中运行，将验证后的 `prepare` 与冲突检查后的 `commit` 分开 | 第一版按整个工作区检测冲突；读写集合是审计证据，尚不用于自动合并无关并发修改 |
 | 崩溃恢复 | run/chat 从完整工具边界恢复，并使恢复前的验证结果失效 | 被强制终止的外部命令可能已经产生部分副作用 |
 | HMAC 认证撤销 | 私有 Undo journal 以 HMAC 绑定轨迹、工作区、路径和内容 hash，并在覆盖前检查冲突 | HMAC 校验可检测本机 journal 是否被篡改，不证明修改在语义上安全 |
-| Fail-closed 隔离 | `auto` 实际探测后端；没有可用后端时拒绝执行命令，除非用户显式选择 `none` | macOS 使用 `sandbox-exec`，Linux 使用 `bwrap` 或 Docker；原生 Windows 的完整 Agent runtime 尚不支持 |
+| Fail-closed 隔离 | `auto` 实际探测后端；没有可用后端时拒绝执行命令，除非用户显式选择 `none` | macOS 使用 `sandbox-exec`，Linux 使用 `bwrap` 或 Docker；原生 Windows 的 `auto` 只使用 Docker，没有本机强隔离后端 |
 | 进程清理 | 超时、Ctrl-C、SIGTERM 和异常后尝试回收命令进程组及本次 Docker 容器 | 原生进程组清理是 best effort；double-fork 进程可创建新 session，`sandbox-exec` 不提供 PID namespace、cgroup 或容器等价的完整后代进程收容 |
 
 这些机制是纵深防御，不是绝对安全沙箱。不要把不受信任的仓库与生产凭证放在同一工作区，也不要未经检查运行仓库自带的构建或测试命令；完整威胁模型见 [SECURITY.md](SECURITY.md)。
@@ -55,7 +56,7 @@ mca sandbox probe --sandbox auto
 - LangGraph Agent Loop
 - 可恢复的 run/chat checkpoint、trajectory、diff 与可冲突检测的 undo
 - `/ask` 只读聊天和 `/code` 编码授权模式
-- macOS `sandbox-exec`、Linux `bwrap`，以及 macOS/Linux/WSL2 的 Docker 后端
+- macOS `sandbox-exec`、Linux `bwrap`，以及跨平台 Docker 后端
 - OpenAI 与 DeepSeek 独立 provider 配置
 
 ## 它是什么界面
@@ -69,7 +70,7 @@ mca sandbox probe --sandbox auto
 - Python 3.10+ 和项目虚拟环境
 - 真实 `run` / `chat` 需要 DeepSeek 或 OpenAI API Key；确定性的 `mca demo` 不需要 Key
 - 明确可用的隔离后端：macOS `sandbox-exec`、Linux `bwrap` 或 Docker；如果显式使用 `--sandbox none`，只应指向无凭证、可丢弃的可信目录
-- 原生 Windows 仅验证 `help`、`version`、`doctor` 和配置路径；`run`、`chat`、`demo` 及结构化文件工具请在 WSL2/Linux 中运行
+- 原生 Windows 可运行 `run`、`chat`、demo、事务和结构化文件工具；本地命令使用 `cmd.exe`，隔离执行需 Docker，或显式接受 `--sandbox none`
 - 用户预先配置的权威验证：单个 `--test-command`，或按顺序列出的命名 `--check`
 - 可写的用户状态目录；默认目录和权限见“运行状态与轨迹”
 
@@ -99,9 +100,11 @@ python -m pip install mini-code-agent-langgraph
 mca --version
 mca --help
 mca doctor --sandbox none
+mca demo
+mca tx demo
 ```
 
-该原生 Windows 安装只承诺信息诊断命令；完整 Agent runtime 请从 WSL2/Linux 环境运行。
+原生 Windows 已纳入 runtime CI。目标仓库的验证命令应使用 Windows 可执行语法；依赖 Bash、GNU 工具链或 POSIX 路径语义的项目仍建议在 WSL2 中运行。
 
 ### 源码开发
 
@@ -115,7 +118,7 @@ mca doctor --sandbox none
 mca demo
 ```
 
-Demo 不需要 API Key，也不会修改仓库中的 `examples/calculator_bug`。它内部对确定性 fixture 显式使用无隔离执行，因此只适合作为本地演示；真实 `run` / `chat` 仍保持 fail-closed 沙箱默认值。Demo 依赖 POSIX 命令执行，支持 macOS、Linux 和 WSL2，不支持原生 Windows。
+Demo 不需要 API Key，也不会修改仓库中的 `examples/calculator_bug`。它内部对确定性 fixture 显式使用无隔离执行，因此只适合作为本地演示；真实 `run` / `chat` 仍保持 fail-closed 沙箱默认值。命令会按平台序列化，在 POSIX 使用 `/bin/sh`，在原生 Windows 使用 `cmd.exe`。
 
 ## 命名验证矩阵
 
@@ -140,6 +143,44 @@ mca run "Fix the issue" \
 指纹在检查边界捕获。它能检测持久性改动，但无法证明命令没有在两次捕获之间完整地修改并恢复文件；此功能不声称提供不可变快照执行。
 
 矩阵配置命令不会直接序列化到结构化证据中，且输出有大小边界。对已知模式、环境变量值以及通过现有脱敏控制配置的值，脱敏均为尽力而为；任意命令输出可能回显命令文本或无法被完美分类的值。轨迹文件应视为敏感数据，未经审查不得发布。
+
+## 事务运行
+
+当你不希望 Agent 在验证和人工提交前直接改动源工作区时，使用事务模式：
+
+```bash
+mca tx run "Fix the failing tests" \
+  --cwd /path/to/clean/git/repo \
+  --model deepseek \
+  --check tests "pytest -q"
+
+mca tx status TRANSACTION_ID
+mca tx receipt TRANSACTION_ID
+mca tx commit TRANSACTION_ID
+```
+
+`tx run` 会对干净的 Git 根目录建立快照，在私有状态目录下创建 detached worktree，并在其中运行原有的沙箱 Agent。每次工具调用都会持续写入访问 WAL，同时记录 read/write set。只有 Agent 已提交、通过的验证指纹又与隔离工作区精确一致时，事务才进入 `prepared`；在执行 `tx commit` 前，源工作区不会被修改。
+
+`tx commit` 会再次确认源仓库 `HEAD`、整个源工作区指纹和 prepared 工作区指纹均未改变，并先执行 Git patch 检查。被 `.gitignore` 忽略或其他无法由补丁表达的变化不能进入 `prepared`。第一版有意采用整个工作区级别的严格冲突检测；记录的 read/write set 目前用于审计，不会自动合并无关的并发修改。
+
+每个 prepared transaction 都会获得一份 HMAC 认证的 receipt，将基线、patch hash、验证证据与指纹、trajectory 摘要、WAL 摘要和访问集合绑定起来。`tx commit` 会强制把 receipt 与持久状态交叉校验，`mca tx receipt` 可展示其中不含源码的证据。它依赖本机私有密钥提供本地防篡改能力，不是可移植签名，也不意味着另一台机器应当直接信任。
+
+进程在完整工具 checkpoint 后中断时，可以用相同模型与验证配置恢复；也可以直接放弃隔离工作区：
+
+```bash
+mca tx resume TRANSACTION_ID --model deepseek --check tests "pytest -q"
+mca tx abort TRANSACTION_ID
+```
+
+事务 manifest、checkpoint、patch 和 worktree 都位于私有应用状态目录，该目录必须在源仓库之外。`commit` 能拒绝提交前观察到的冲突，但它不是覆盖整个文件系统的锁，无法阻止其他进程恰好在短暂的 check/apply 间隔中竞态写入。
+
+无需 API Key 即可运行成功提交和冲突拒绝两个场景：
+
+```bash
+mca tx demo
+```
+
+Demo 会证明成功场景在 commit 前没有修改源仓库；随后在第二个仓库注入并发用户编辑，展示 commit 拒绝且不会覆盖该编辑。
 
 ## 配置密钥
 
@@ -347,10 +388,10 @@ Undo 原始恢复内容保存在状态根目录的私有 `undo/` 中，使用 `0
 - macOS：优先尝试系统 `sandbox-exec`。它拒绝网络和默认写入，隐藏真实 home（其中的目标工作区除外），只允许写工作区和 executor 所有的私有 runtime tree；`HOME`、`TMPDIR` 指向该私有目录，共享 `/tmp` 与 `/private/tmp` 不可写。它是系统策略 profile，不是 PID namespace、cgroup 或容器边界，而且系统可能弃用或限制它
 - Linux：优先尝试 `bwrap`。它 unshare namespaces 并保持宿主根目录只读；workspace 与 executor runtime tree 是仅有的可写宿主路径，沙箱内的私有 `/run`、`/tmp` 和 home tmpfs 也可写，并使用私有 `/dev` 与全新 `/proc`。其 PID namespace 对后代进程的收容强于普通进程组，但仍依赖宿主内核与 Bubblewrap
 - macOS / Linux：安装并启动 Docker，并预先拉取沙箱镜像后可选择 `--sandbox docker`；容器无网络、根文件系统只读、丢弃 capabilities、设置资源上限，只有工作区 bind mount 可写，`/tmp` 是私有且有大小限制的 tmpfs。在 POSIX 宿主上以调用者的数字 UID:GID 运行，并显式设置私有 `HOME`/`TMPDIR`、Python bytecode 与 Git 环境。默认镜像是 `python:3.11-slim`，可用 `--docker-image` 或 `MCA_DOCKER_IMAGE` 指向带目标项目依赖的预构建镜像，运行时不会隐式拉镜像
-- 原生 Windows：`0.3.x` 不支持完整的 Agent runtime；请在 WSL2/Linux 中使用上述隔离后端
+- 原生 Windows：本地命令由 `cmd.exe` 执行，超时清理使用 `taskkill /T /F`；`auto` 仅尝试 Docker。没有 Docker 时必须显式选择 `--sandbox none`，这不提供隔离
 - 没有可用后端时，只有显式 `--sandbox none` 才允许不隔离执行
 
-可用 `mca sandbox probe --sandbox auto` 检查上述有限边界，也可显式指定 `sandbox-exec`、`bwrap` 或 `docker`。所有 Docker coding/test 镜像都必须提供 `/bin/sh`，probe 还额外需要 `python3`；普通编码运行仍可使用满足 `/bin/sh` 要求的其他预拉取自定义镜像。原生进程组清理无法证明 double-fork 后创建新 session 的进程已被回收；Bubblewrap 的 PID namespace 和 Docker 容器边界提供更强的后代进程收容，但所有后端都不是完整 OS/process containment 保证。
+可用 `mca sandbox probe --sandbox auto` 检查上述有限边界，也可显式指定 `sandbox-exec`、`bwrap` 或 `docker`。所有 Docker coding/test 镜像都必须提供 `/bin/sh`，probe 还额外需要 `python3`；普通编码运行仍可使用满足 `/bin/sh` 要求的其他预拉取自定义镜像。原生进程清理都是 best effort：POSIX 的 double-fork 或 Windows 中脱离进程树的后代仍可能逃逸；Bubblewrap 的 PID namespace 和 Docker 容器边界提供更强收容，但所有后端都不是完整 OS/process containment 保证。
 
 沙箱、路径检查和脱敏都不是运行不可信仓库的绝对安全边界。不要让 Agent 在包含生产凭证、SSH 私钥或不应被模型读取的数据目录中运行。
 
@@ -365,6 +406,11 @@ src/mini_code_agent/model.py       工具声明与 provider adapter
 src/mini_code_agent/executor.py    Tool Runtime、审批和沙箱
 src/mini_code_agent/verification.py 工作区指纹绑定的验证门
 src/mini_code_agent/trajectory.py  Trace、Diff 和 Undo
+src/mini_code_agent/transaction.py 框架无关的事务状态机
+src/mini_code_agent/transaction_adapter.py Agent 工具调用与读写集适配层
+src/mini_code_agent/transaction_cli.py 事务命令编排与 Demo
+src/mini_code_agent/receipt.py     HMAC 认证的 prepared patch receipt
+src/mini_code_agent/locking.py     POSIX/Windows 事务文件锁
 src/mini_code_agent/security.py    路径与密钥安全
 src/mini_code_agent/cli.py         CLI、状态目录与授权模式
 ```

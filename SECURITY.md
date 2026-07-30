@@ -2,7 +2,7 @@
 
 mini-code-agent-langgraph is a compact reference runtime for studying and extending coding-agent safety controls. Its controls reduce accidental damage and constrain model actions, but they do not make arbitrary repositories, commands, dependencies, containers, or model providers trustworthy.
 
-中文摘要：本项目采用最小权限、验证门、私有状态、HMAC 认证撤销和 fail-closed 命令隔离作为纵深防御；它不是绝对安全沙箱。请勿在包含生产凭证或其他敏感资产的工作区中运行不受信任的代码。
+中文摘要：本项目采用最小权限、验证门、事务隔离、HMAC 认证凭证与撤销，以及 fail-closed 命令隔离作为纵深防御；它不是绝对安全沙箱。请勿在包含生产凭证或其他敏感资产的工作区中运行不受信任的代码。
 
 ## Supported versions
 
@@ -46,6 +46,7 @@ Never include a real API key, access token, private repository content, or an un
 - the integrity and confidentiality of private state and Undo source content;
 - the host from accidental, lingering, or unconstrained command execution;
 - the integrity of the verify-before-submit decision.
+- the integrity of prepared transaction evidence and source conflict checks.
 
 ### Trust assumptions
 
@@ -65,11 +66,13 @@ Never include a real API key, access token, private repository content, or an un
 - Linux `bwrap` unshares namespaces and keeps the host root read-only. The workspace and executor-owned runtime tree are the only writable host paths; private writable tmpfs mounts provide `/run`, `/tmp`, and home, alongside private `/dev` and fresh `/proc` views.
 - macOS `sandbox-exec` denies network and default writes, hides the real home except for a workspace below it, and permits writes only to that workspace and the private runtime tree used for `HOME` and `TMPDIR`. Shared `/tmp` and `/private/tmp` are not writable.
 - Docker runs without network or capabilities, with a read-only root, resource limits, one writable workspace bind, and a private size-limited `/tmp`. On POSIX it maps the invoking numeric UID:GID and explicitly sets private `HOME`/`TMPDIR`, Python-bytecode, and Git environment values.
-- Native Windows is limited to informational CLI/configuration paths in `0.3.x`; run the full Agent runtime and structured file tools from WSL2/Linux.
+- Native Windows runs the Agent runtime, structured tools, and transactions. Local commands use `cmd.exe`; `--sandbox auto` can select Docker only, so `--sandbox none` is an explicit unisolated opt-out when Docker is unavailable.
+- POSIX structured file writes use descriptor-relative operations where supported. The Windows fallback repeats containment and symlink/reparse-point checks and uses same-directory atomic replacement, but cannot provide the same resistance to a concurrent path-component swap; do not let another untrusted process mutate the workspace concurrently.
 - A successful test is bound to the current workspace fingerprint. Fingerprint-changing operations, a failed authoritative `run_tests`, and resume invalidate stale verification.
 - Resume starts from a complete tool boundary and requires fresh verification before submission. The new-run dirty-worktree gate is not a substitute for reviewing or stashing extra changes before resume.
 - Private Undo journals are stored with restrictive permissions and authenticated with HMAC over the trajectory/workspace/path/content relationship. Undo checks for post-edit conflicts before writing.
-- Child commands have time and output bounds. Timeout, Ctrl-C, SIGTERM, and exception paths attempt to reap the process group and the Docker container created for that invocation.
+- Transactional runs keep agent edits in a detached worktree until explicit commit. Prepare emits a private HMAC-authenticated receipt binding baseline, patch, verification, trajectory, WAL, and access-set digests; commit verifies the receipt and rejects changed source or prepared snapshots.
+- Child commands have time and output bounds. Timeout, Ctrl-C, termination signals, and exception paths attempt to reap the POSIX process group, the Windows process tree through `taskkill`, and the Docker container created for that invocation.
 - Provider environments are narrowed and secret-like values are redacted from observations and trajectories on a best-effort basis; trajectories remain sensitive and are never considered safe to publish by default.
 
 ## Verification matrices and evidence limits
@@ -98,6 +101,7 @@ The project does **not** guarantee:
 - complete descendant-process containment on native host backends: process-group cleanup is best effort, and a double-fork can create a new session. Bubblewrap's PID namespace and Docker's container boundary provide stronger containment, but `sandbox-exec` is not a PID namespace, cgroup, or container boundary;
 - availability against denial-of-service, resource exhaustion outside configured limits, or provider outages;
 - protection after the local account, Python environment, dependency chain, local HMAC key material, or host is compromised.
+- portable or third-party trust in a transaction receipt; its HMAC authenticates local state only, and the receipt does not prove test completeness, semantic correctness, or absence of a check/apply race.
 
 Flags such as `--sandbox none`, `--allow-shell`, `--allow-dirty`, `--yes`, `--force`, and `--allow-legacy-unsafe` deliberately weaken one or more controls. Use them only in disposable, credential-free workspaces after reviewing the consequence.
 
@@ -113,4 +117,4 @@ Docker isolation additionally assumes the selected image is trusted. Every image
 
 ## Security-sensitive changes
 
-Changes to workspace path resolution, symlink handling, command execution, sandbox selection, subprocess environments, approval modes, workspace fingerprints, verification state, checkpoint parsing, trajectory serialization, secret redaction, or Undo authentication require focused security tests and explicit threat-model review. See [CONTRIBUTING.md](CONTRIBUTING.md) for the expected review checklist.
+Changes to workspace path resolution, symlink handling, command execution, sandbox selection, subprocess environments, approval modes, workspace fingerprints, verification state, transaction receipts, checkpoint parsing, trajectory serialization, secret redaction, or Undo authentication require focused security tests and explicit threat-model review. See [CONTRIBUTING.md](CONTRIBUTING.md) for the expected review checklist.

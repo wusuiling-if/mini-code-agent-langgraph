@@ -54,6 +54,76 @@ def test_parser_accepts_nested_sandbox_probe():
     assert args.sandbox == "docker"
 
 
+@pytest.mark.parametrize("command", ["status", "receipt", "commit", "abort"])
+def test_parser_accepts_transaction_state_commands(command: str):
+    args = cli_module.build_parser().parse_args(["tx", command, "0" * 24])
+
+    assert args.command == "tx"
+    assert args.transaction_command == command
+    assert args.transaction_id == "0" * 24
+
+
+def test_parser_accepts_transaction_run_and_resume():
+    parser = cli_module.build_parser()
+    run = parser.parse_args(
+        [
+            "tx",
+            "run",
+            "fix it",
+            "--model",
+            "deepseek",
+            "--test-command",
+            "pytest -q",
+        ]
+    )
+    resume = parser.parse_args(
+        [
+            "tx",
+            "resume",
+            "0" * 24,
+            "--model",
+            "deepseek",
+            "--test-command",
+            "pytest -q",
+        ]
+    )
+
+    assert run.transaction_command == "run"
+    assert run.task == "fix it"
+    assert resume.transaction_command == "resume"
+    assert resume.transaction_id == "0" * 24
+
+
+def test_parser_accepts_transaction_demo():
+    args = cli_module.build_parser().parse_args(["tx", "demo"])
+
+    assert args.command == "tx"
+    assert args.transaction_command == "demo"
+
+
+def test_transaction_demo_proves_commit_and_conflict_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    from mini_code_agent import transaction_cli
+
+    root = tmp_path / "transaction-demo"
+    root.mkdir()
+    monkeypatch.setattr(cli_module, "_create_demo_workspace", lambda: root)
+
+    result = transaction_cli.demo_command(
+        cli_module.build_parser().parse_args(["tx", "demo"])
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "success.source_unchanged_before_commit: true" in output
+    assert "success.commit: committed" in output
+    assert "conflict.commit: refused" in output
+    assert "conflict.user_change_preserved: true" in output
+
+
 def test_parser_rejects_none_for_sandbox_probe():
     with pytest.raises(SystemExit):
         cli_module.build_parser().parse_args(

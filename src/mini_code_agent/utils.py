@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shlex
 import stat
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +15,17 @@ if TYPE_CHECKING:
 
 DEFAULT_OUTPUT_LIMIT = 12000
 MAX_STATE_FILE_BYTES = 256 * 1024 * 1024
+
+
+def command_from_argv(argv: list[str], *, platform_name: str | None = None) -> str:
+    """Serialize trusted argv for the platform's command interpreter."""
+
+    if not argv or any(not isinstance(item, str) for item in argv):
+        raise ValueError("argv must be a non-empty list of strings")
+    platform_name = os.name if platform_name is None else platform_name
+    if platform_name == "nt":
+        return subprocess.list2cmdline(argv)
+    return shlex.join(argv)
 
 
 def truncate_text(text: str, limit: int = DEFAULT_OUTPUT_LIMIT) -> str:
@@ -72,18 +85,20 @@ def atomic_write_text(
         raise FileExistsError(f"could not allocate a safe temporary file for {path}")
 
     try:
-        os.fchmod(fd, mode)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding=encoding, newline="") as handle:
             fd = -1
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        if os.name != "nt":
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     finally:
         if fd >= 0:
             os.close(fd)

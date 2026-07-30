@@ -322,7 +322,8 @@ def _load_or_create_key(state_dir: Path) -> bytes:
     else:
         key = secrets.token_bytes(32)
         try:
-            os.fchmod(fd, 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
             os.write(fd, key)
             os.fsync(fd)
         finally:

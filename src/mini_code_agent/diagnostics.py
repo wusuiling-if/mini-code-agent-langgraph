@@ -176,7 +176,8 @@ def _sandbox_check(sandbox: str) -> DiagnosticCheck:
     if sandbox == "none":
         return DiagnosticCheck("sandbox", "warn", "sandbox isolation is explicitly disabled")
     if sandbox == "auto":
-        for backend in _SANDBOX_BACKENDS:
+        backends = ("docker",) if os.name == "nt" else _SANDBOX_BACKENDS
+        for backend in backends:
             try:
                 executable = shutil.which(backend)
             except OSError as exc:
@@ -190,10 +191,18 @@ def _sandbox_check(sandbox: str) -> DiagnosticCheck:
         return DiagnosticCheck(
             "sandbox",
             "fail",
-            "no sandbox backend is available on PATH (checked sandbox-exec, bwrap, docker)",
+            "no sandbox backend is available on PATH (checked "
+            + ", ".join(backends)
+            + ")",
         )
     if sandbox not in _SANDBOX_BACKENDS:
         return DiagnosticCheck("sandbox", "fail", f"unsupported sandbox mode: {sandbox}")
+    if os.name == "nt" and sandbox != "docker":
+        return DiagnosticCheck(
+            "sandbox",
+            "fail",
+            f"{sandbox} is not supported on native Windows; use docker or none",
+        )
     try:
         executable = shutil.which(sandbox)
     except OSError as exc:

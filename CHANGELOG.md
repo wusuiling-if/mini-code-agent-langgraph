@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- Added `mca tx run/resume/status/receipt/commit/abort`, which executes coding runs in an isolated Git worktree, persists a tool-access WAL and read/write sets, and exposes an explicit verified `prepare` followed by conflict-checked `commit`.
+- Added HMAC-authenticated prepared-patch receipts binding baseline, patch, verification, trajectory, WAL, and access-set evidence, plus a no-key `mca tx demo` for successful commit and concurrent-conflict refusal.
+- Added native Windows command execution through `cmd.exe`, process-tree cleanup through `taskkill`, cross-platform transaction locks, and Windows CI coverage for both no-key demos.
+
+### Changed
+
+- Split the framework-independent transaction state machine from the Agent tool adapter. `transaction.py` no longer imports LangGraph or Agent contracts, while `transaction_adapter.py` owns tool-call auditing.
+- Generalized `BashExecutor` internally to the platform-aware `CommandExecutor`; the former name and the `bash` tool identifier remain compatibility aliases.
+
+### Security
+
+- Transaction commit now fails closed when the source `HEAD` or whole-workspace snapshot changed after begin, when the prepared workspace changed after verification, when workspace changes cannot be represented by the prepared Git patch, or when the private prepared patch fails its recorded SHA-256 integrity check.
+- Transaction state must remain outside the source repository. The initial transaction protocol intentionally rejects all concurrent source-workspace changes; recorded read/write sets are audit evidence and do not yet relax conflict granularity.
+- Receipts provide local tamper evidence under private machine key material; they are not portable third-party attestations and do not prove test completeness or semantic correctness.
+- Native Windows has no built-in strong isolation backend. `--sandbox auto` uses Docker when available; `--sandbox none` is an explicit unisolated opt-out. Structured file operations use containment and symlink checks but cannot provide POSIX descriptor-relative race resistance against concurrent reparse-point changes.
+
 ## [0.3.4] - 2026-07-22
 
 ### Added

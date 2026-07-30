@@ -553,6 +553,16 @@ def test_regular_ci_is_main_scoped_and_caches_pip_dependencies():
             assert re.search(r"(?m)^\s+requirements-ci\.txt\s*$", setup_block)
 
 
+def test_cli_smoke_exercises_native_windows_runtime_paths():
+    cli_smoke = _job_blocks(_workflow("tests.yml"))["cli-smoke"]
+    assert "windows-latest" in cli_smoke
+    assert 'python -m pip install -e ".[dev]"' in cli_smoke
+    assert "tests/test_windows_compat.py tests/test_transaction.py" in cli_smoke
+    assert "run: mca demo" in cli_smoke
+    assert "run: mca tx demo" in cli_smoke
+    assert cli_smoke.count("if: runner.os == 'Windows'") >= 3
+
+
 def test_offline_eval_uploads_only_sanitized_json_for_seven_days():
     eval_job = _job_blocks(_workflow("tests.yml"))["offline-eval"]
     output = "artifacts/evals/v0.3.2.json"

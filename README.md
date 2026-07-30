@@ -4,15 +4,16 @@
 [![Python 3.10–3.13](https://img.shields.io/badge/Python-3.10%E2%80%933.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/LICENSE)
 
-> A compact, security-first LangGraph coding agent with verified patches, crash recovery, and HMAC-authenticated undo.
+> A compact transactional runtime for coding agents: isolate, verify, attest, then commit.
 
 [中文详细指南](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/README.zh-CN.md) · [Security policy](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/SECURITY.md) · [Contributing](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CONTRIBUTING.md) · [Changelog](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CHANGELOG.md)
 
-`mini-code-agent-langgraph` is a single-process, line-oriented CLI and REPL for studying, auditing, and extending a constrained coding-agent loop. It is not a full-screen TUI or web application.
+`mini-code-agent-langgraph` is a small, auditable runtime centered on one mechanism: an agent works in an isolated Git transaction, produces verification-bound evidence, and cannot update the source worktree until an explicit conflict-checked commit. LangGraph is the included loop adapter, not the transaction core.
 
 ![`mca demo` fixes a calculator bug, verifies the tests, and submits the patch](https://raw.githubusercontent.com/wusuiling-if/mini-code-agent-langgraph/main/docs/assets/demo.gif)
 
 - **Verification-bound submission:** user-configured verification—legacy `--test-command` or named `--check` entries—must pass against the current workspace fingerprint before the agent can submit.
+- **Transactional execution:** `mca tx` treats an agent run as a prepare/commit protocol: the source stays untouched until verification evidence and conflict checks agree.
 - **Inspectable recovery:** redacted trajectories persist each run and can resume safely after an interruption.
 - **Conflict-aware Undo:** a private HMAC-authenticated journal rejects post-edit conflicts by default.
 
@@ -75,6 +76,44 @@ mca trace /path/to/run.traj.json --diff
 mca undo /path/to/run.traj.json --dry-run
 ```
 
+## Transactional runs
+
+Use a transaction when the agent must not edit the source worktree before its patch is verified and explicitly committed:
+
+```bash
+mca tx run "Fix the failing tests" \
+  --cwd /path/to/clean/git/repo \
+  --model deepseek \
+  --check tests "pytest -q"
+
+mca tx status TRANSACTION_ID
+mca tx receipt TRANSACTION_ID
+mca tx commit TRANSACTION_ID
+```
+
+`tx run` snapshots a clean Git root, creates a detached worktree under the private state directory, and runs the normal sandboxed agent there. Tool calls are persisted as a write-ahead access log with read/write sets. A run reaches `prepared` only when the agent submits and its passing verification fingerprint exactly matches the isolated workspace. Until `tx commit`, the source worktree is unchanged.
+
+`tx commit` fails closed unless the source `HEAD` and entire source-workspace fingerprint still match the begin snapshot and the isolated workspace still matches the prepared fingerprint. It checks the binary Git patch before applying it; ignored or otherwise non-patchable workspace changes cannot be prepared. This first version deliberately uses whole-workspace conflict detection. The recorded read/write sets are audit evidence, not yet a promise that unrelated concurrent edits can be merged.
+
+Every prepared transaction receives an HMAC-authenticated receipt binding the baseline, patch hash, verification evidence and fingerprint, trajectory digest, WAL digest, and access sets. `tx commit` verifies that receipt against durable state; `mca tx receipt` renders its non-source evidence. This is local tamper evidence under the private machine key, not a portable signature or proof that another machine should trust.
+
+If the process stops after a complete tool checkpoint, resume with the same model and verification configuration:
+
+```bash
+mca tx resume TRANSACTION_ID --model deepseek --check tests "pytest -q"
+mca tx abort TRANSACTION_ID
+```
+
+Transaction metadata, checkpoints, patches, and worktrees live under the private application state directory. Keep that directory outside the source repository. `commit` protects against observed pre-commit conflicts; it is not a filesystem-wide lock against another process racing the short check/apply interval.
+
+Run the two-path demonstration without an API key:
+
+```bash
+mca tx demo
+```
+
+It proves that the successful source remains unchanged before commit, then injects a concurrent user edit into a second repository and shows that commit is refused without overwriting it.
+
 ## Enforced controls and limits
 
 - New runs and chats reject dirty Git worktrees by default; arbitrary shell access is disabled by default.
@@ -82,7 +121,7 @@ mca undo /path/to/run.traj.json --dry-run
 - User-configured authoritative verification—legacy `--test-command` or named `--check` entries—must pass against the current workspace fingerprint before submission. A recognized zero-test result is rejected by default, and resume invalidates earlier verification.
 - Undo uses a private, HMAC-authenticated journal and rejects post-edit conflicts unless explicitly forced.
 - `--allow-zero-tests` explicitly weakens verification by allowing a recognized zero-test result to satisfy the gate. `--sandbox none`, `--allow-shell`, `--allow-dirty`, `--yes`, and force/legacy Undo options also deliberately weaken protections; `--sandbox auto` fails closed if no usable backend is found.
-- Native Windows supports informational CLI and configuration paths only. Run the full agent, structured tools, and `mca demo` from macOS, Linux, or WSL2. macOS uses `sandbox-exec`; Linux uses `bwrap` or Docker when available.
+- Native Windows supports the Agent runtime, structured tools, `mca demo`, and transactions. Local commands use `cmd.exe`; `--sandbox auto` requires Docker because Windows has no built-in native isolation backend. `--sandbox none` is an explicit unisolated opt-out. macOS uses `sandbox-exec`; Linux uses `bwrap` or Docker when available.
 
 Backend boundaries differ:
 
@@ -116,6 +155,11 @@ src/mini_code_agent/chat.py          Persistent chat session
 src/mini_code_agent/executor.py      Tools, approvals, and sandboxing
 src/mini_code_agent/verification.py  Workspace-fingerprint verification gate
 src/mini_code_agent/trajectory.py    Trajectory, trace, and undo support
+src/mini_code_agent/transaction.py   Framework-independent transaction state machine
+src/mini_code_agent/transaction_adapter.py Agent tool-call and access-set adapter
+src/mini_code_agent/transaction_cli.py Transaction command orchestration and demo
+src/mini_code_agent/receipt.py       Authenticated prepared-patch receipts
+src/mini_code_agent/locking.py       POSIX/Windows transaction file locks
 src/mini_code_agent/security.py      Path and secret protections
 src/mini_code_agent/cli.py           CLI and state/configuration handling
 tests/                               Deterministic test suite
@@ -134,4 +178,4 @@ mca doctor --sandbox none
 mca demo
 ```
 
-`mca doctor --sandbox none` is a read-only configuration smoke test and intentionally reports an isolation warning. Skip `mca demo` on native Windows and run it from WSL2 instead. For release expectations, see [CHANGELOG.md](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CHANGELOG.md).
+`mca doctor --sandbox none` is a read-only configuration smoke test and intentionally reports an isolation warning. Native Windows runs both demos in CI; use Docker for isolated command execution or WSL2 when POSIX tooling is required by the target repository. For release expectations, see [CHANGELOG.md](https://github.com/wusuiling-if/mini-code-agent-langgraph/blob/main/CHANGELOG.md).

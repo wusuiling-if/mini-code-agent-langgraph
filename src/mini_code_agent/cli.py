@@ -19,6 +19,7 @@ from mini_code_agent.checks import (
     VerificationCheck,
     normalize_verification_checks,
 )
+from mini_code_agent.utils import command_from_argv
 
 
 # These nullable seams keep CLI imports lightweight while preserving the
@@ -283,6 +284,39 @@ def _model_from_args(args: argparse.Namespace):
     )
 
 
+def _add_transaction_runtime_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--model", required=True, help="Model name.")
+    parser.add_argument("--provider", choices=["auto", "deepseek", "openai"], default="auto")
+    parser.add_argument("--base-url", default=None, help="Provider API base URL.")
+    parser.add_argument("--env-file", type=Path, default=None)
+    parser.add_argument("--max-steps", type=_positive_int, default=50)
+    parser.add_argument("--context-chars", type=_positive_int, default=60_000)
+    parser.add_argument("--timeout", type=_positive_int, default=30)
+    parser.add_argument("--request-timeout", type=_positive_float, default=60.0)
+    parser.add_argument("--max-retries", type=_non_negative_int, default=2)
+    parser.add_argument("--deepseek-thinking", action="store_true")
+    parser.add_argument("--test-command", type=_non_empty_command, default=None)
+    parser.add_argument(
+        "--check",
+        dest="checks",
+        action="append",
+        nargs=2,
+        metavar=("NAME", "COMMAND"),
+        default=None,
+    )
+    parser.add_argument("--allow-zero-tests", action="store_true")
+    parser.add_argument("--allow-shell", action="store_true")
+    parser.add_argument(
+        "--sandbox",
+        choices=["auto", "sandbox-exec", "bwrap", "docker", "none"],
+        default="auto",
+    )
+    parser.add_argument("--docker-image", default=None)
+    parser.add_argument("--yolo", action="store_true")
+    parser.add_argument("--yes", action="store_true", help="Alias for --yolo.")
+    parser.add_argument("--quiet", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mca", description="Mini LangGraph coding agent.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -354,6 +388,37 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--yolo", action="store_true", help="Run commands without confirmation.")
     run.add_argument("--yes", action="store_true", help="Alias for --yolo.")
     run.add_argument("--quiet", action="store_true", help="Hide step output.")
+
+    transaction = subparsers.add_parser(
+        "tx", help="Run and commit coding work as a recoverable transaction."
+    )
+    transaction_commands = transaction.add_subparsers(
+        dest="transaction_command", required=True
+    )
+    transaction_run = transaction_commands.add_parser(
+        "run", help="Run an agent in a new isolated transaction."
+    )
+    transaction_run.add_argument("task", help="Task for the transactional run.")
+    transaction_run.add_argument(
+        "--cwd", default=None, help="Clean Git worktree root. Defaults to current directory."
+    )
+    _add_transaction_runtime_arguments(transaction_run)
+    transaction_resume = transaction_commands.add_parser(
+        "resume", help="Resume an interrupted open transaction."
+    )
+    transaction_resume.add_argument("transaction_id")
+    _add_transaction_runtime_arguments(transaction_resume)
+    for name, help_text in (
+        ("status", "Show durable transaction state."),
+        ("receipt", "Verify and show a prepared transaction receipt."),
+        ("commit", "Apply a prepared transaction to its source worktree."),
+        ("abort", "Discard an isolated transaction worktree."),
+    ):
+        command = transaction_commands.add_parser(name, help=help_text)
+        command.add_argument("transaction_id")
+    transaction_commands.add_parser(
+        "demo", help="Demonstrate successful commit and conflict refusal without an API key."
+    )
 
     chat = subparsers.add_parser("chat", help="Start a persistent chat-and-code session.")
     chat.add_argument("--cwd", default=None, help="Project directory. Defaults to current directory.")
@@ -671,6 +736,24 @@ def main() -> None:
     try:
         if args.command == "run":
             raise SystemExit(run_agent(args))
+        if args.command == "tx" and args.transaction_command == "run":
+            from mini_code_agent.transaction_cli import agent_command
+
+            raise SystemExit(agent_command(args, resume=False))
+        if args.command == "tx" and args.transaction_command == "resume":
+            from mini_code_agent.transaction_cli import agent_command
+
+            raise SystemExit(agent_command(args, resume=True))
+        if args.command == "tx" and args.transaction_command == "demo":
+            from mini_code_agent.transaction_cli import (
+                demo_command as transaction_demo_command,
+            )
+
+            raise SystemExit(transaction_demo_command(args))
+        if args.command == "tx":
+            from mini_code_agent.transaction_cli import state_command
+
+            raise SystemExit(state_command(args))
         if args.command == "chat":
             raise SystemExit(chat_command(args))
         if args.command == "trace":
@@ -822,7 +905,7 @@ def _demo_forbidden_root() -> Path:
 
 
 def _platform_supports_demo() -> bool:
-    return os.name != "nt"
+    return True
 
 
 def demo_command(_args: argparse.Namespace) -> int:
@@ -834,7 +917,9 @@ def demo_command(_args: argparse.Namespace) -> int:
     root = _create_demo_workspace()
     _write_demo_fixture(root)
     trajectory_path = root.with_suffix(".traj.json")
-    test_command = f"{shlex.quote(sys.executable)} -m unittest discover -v"
+    test_command = command_from_argv(
+        [sys.executable, "-m", "unittest", "discover", "-v"]
+    )
     executor = _load_bash_executor()(
         root,
         approval_mode="yolo",

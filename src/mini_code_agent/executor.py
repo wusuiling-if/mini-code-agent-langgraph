@@ -53,6 +53,9 @@ DANGEROUS_COMMAND_PATTERNS = [
     re.compile(r"(^|[;&|]\s*)dd\s+.*\bof=/dev/"),
     re.compile(r"(curl|wget)[^\n|;]*(\|\s*(sh|bash))"),
     re.compile(r">\s*/(etc|bin|sbin|usr|System|Library)/"),
+    re.compile(r"(?i)(^|[&|]\s*)(del|erase)\s+[^\r\n]*(/[sq]|-[sq])[^\r\n]*\s+[a-z]:\\"),
+    re.compile(r"(?i)(^|[&|]\s*)(rd|rmdir)\s+[^\r\n]*/s[^\r\n]*\s+[a-z]:\\"),
+    re.compile(r"(?i)(^|[&|]\s*)format(\.com)?\s+[a-z]:"),
 ]
 
 SKIP_DIR_NAMES = frozenset({
@@ -80,6 +83,10 @@ SAFE_INHERITED_ENV = frozenset({
     "SYSTEMROOT",
     "WINDIR",
 })
+
+
+def _is_windows_platform() -> bool:
+    return os.name == "nt"
 
 
 @dataclass(frozen=True)
@@ -142,7 +149,7 @@ def _defer_sigterm_until_cleanup():
         signal.signal(signal.SIGTERM, previous)
 
 
-class BashExecutor:
+class CommandExecutor:
     def __init__(
         self,
         cwd: Path,
@@ -269,7 +276,7 @@ class BashExecutor:
             return ToolResult(
                 tool="bash",
                 command=self.redactor.redact_text(command),
-                output="Arbitrary bash is disabled. Use list_files, search_files, read_file, apply_patch, run_tests, git_diff, or submit.",
+                output="Arbitrary shell access is disabled. Use list_files, search_files, read_file, apply_patch, run_tests, git_diff, or submit.",
                 returncode=-1,
                 duration_ms=0,
                 exception_info="ShellDisabled",
@@ -941,7 +948,18 @@ class BashExecutor:
         return answer in {"y", "yes"}
 
     def _run(self, command: str) -> subprocess.CompletedProcess[str]:
-        return self._run_argv(["/bin/sh", "-c", command])
+        return self._run_argv(self._command_argv(command))
+
+    def _command_argv(self, command: str, *, login: bool = False) -> list[str]:
+        mode = self._selected_sandbox_mode()
+        if mode == "docker" or not _is_windows_platform():
+            return ["/bin/sh", "-lc" if login else "-c", command]
+        executable = self._trusted_executable("cmd.exe") or self._trusted_executable(
+            "cmd"
+        )
+        if not executable:
+            raise RuntimeError("cmd.exe is not available")
+        return [executable, "/d", "/s", "/c", command]
 
     def _run_argv(
         self,
@@ -969,8 +987,19 @@ class BashExecutor:
                     env=self._subprocess_env(),
                     stdout=output,
                     stderr=subprocess.STDOUT,
-                    start_new_session=os.name == "posix",
-                    preexec_fn=self._resource_limiter() if os.name == "posix" else None,
+                    start_new_session=(
+                        os.name == "posix" and not _is_windows_platform()
+                    ),
+                    preexec_fn=(
+                        self._resource_limiter()
+                        if os.name == "posix" and not _is_windows_platform()
+                        else None
+                    ),
+                    creationflags=(
+                        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                        if _is_windows_platform()
+                        else 0
+                    ),
                 )
                 try:
                     with _defer_sigterm_until_cleanup():
@@ -1011,10 +1040,21 @@ class BashExecutor:
     def _terminate_process_group(process: subprocess.Popen) -> None:
         """Best-effort, bounded cleanup for the command and all its descendants."""
 
-        if os.name != "posix":
+        if _is_windows_platform() or os.name != "posix":
             try:
                 if process.poll() is None:
-                    process.terminate()
+                    taskkill = shutil.which("taskkill") if _is_windows_platform() else None
+                    if taskkill:
+                        subprocess.run(
+                            [taskkill, "/PID", str(process.pid), "/T", "/F"],
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=PROCESS_TERMINATION_GRACE_SECONDS,
+                            check=False,
+                        )
+                    else:
+                        process.terminate()
                     try:
                         process.wait(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
                     except BaseException:
@@ -1114,7 +1154,7 @@ class BashExecutor:
 
     def _sandboxed_command(self, command: str) -> str:
         # Backward-compatible debug helper; execution itself always uses argv.
-        return shlex_join(self._sandboxed_argv(["/bin/sh", "-lc", command]))
+        return shlex_join(self._sandboxed_argv(self._command_argv(command, login=True)))
 
     def _sandboxed_argv(self, argv: list[str]) -> list[str]:
         mode = self._selected_sandbox_mode()
@@ -1259,9 +1299,9 @@ class BashExecutor:
             return self._resolved_sandbox_mode
         if self._sandbox_probe_error:
             raise RuntimeError(self._sandbox_probe_error)
-        if self._trusted_executable("sandbox-exec"):
+        if not _is_windows_platform() and self._trusted_executable("sandbox-exec"):
             return "sandbox-exec"
-        if self._trusted_executable("bwrap"):
+        if not _is_windows_platform() and self._trusted_executable("bwrap"):
             return "bwrap"
         if self._trusted_executable("docker"):
             return "docker"
@@ -1333,7 +1373,8 @@ class BashExecutor:
                     ("bwrap", "bwrap"),
                     ("docker", "docker"),
                 ]
-                if self._trusted_executable(executable)
+                if (mode == "docker" or not _is_windows_platform())
+                and self._trusted_executable(executable)
             ]
             if not candidates:
                 self._sandbox_probe_error = (
@@ -1387,9 +1428,9 @@ class BashExecutor:
             return self._resolved_sandbox_mode
         if self._sandbox_probe_error:
             return "unavailable"
-        if self._trusted_executable("sandbox-exec"):
+        if not _is_windows_platform() and self._trusted_executable("sandbox-exec"):
             return "sandbox-exec"
-        if self._trusted_executable("bwrap"):
+        if not _is_windows_platform() and self._trusted_executable("bwrap"):
             return "bwrap"
         if self._trusted_executable("docker"):
             return "docker"
@@ -1435,6 +1476,11 @@ class BashExecutor:
             if pattern.search(command):
                 return f"Blocked dangerous command pattern: {pattern.pattern}"
         return ""
+
+
+# Backward-compatible public name for existing integrations and trajectories.
+BashExecutor = CommandExecutor
+
 
 def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
