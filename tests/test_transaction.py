@@ -342,7 +342,9 @@ def test_mock_agent_prepares_and_commits_through_transaction_runtime(tmp_path: P
     )
 
     trajectory = agent.run(manifest["task"])
-    assert trajectory["exit_status"] == "Submitted"
+    assert trajectory["exit_status"] == "Submitted", json.dumps(
+        trajectory, indent=2
+    )
     assert "return a - b" in (source / "calculator.py").read_text(encoding="utf-8")
     assert store.prepare(manifest["id"], trajectory)["status"] == "prepared"
     assert store.commit(manifest["id"])["status"] == "committed"
