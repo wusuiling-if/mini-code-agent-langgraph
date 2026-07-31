@@ -959,7 +959,7 @@ class CommandExecutor:
         )
         if not executable:
             raise RuntimeError("cmd.exe is not available")
-        return [executable, "/d", "/s", "/c", command]
+        return [executable, "/d", "/s", "/c", f'"{command}"']
 
     def _run_argv(
         self,

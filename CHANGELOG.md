@@ -20,6 +20,7 @@ All notable changes to this project are documented in this file. The format foll
 ### Fixed
 
 - Preserved Windows CRLF normalization during isolated Git inspection so a clean worktree is not rejected when the index stores normalized LF content.
+- Preserved nested argument quotes through `cmd.exe /s /c`, and stored receipt keys with binary I/O so Windows verification commands and tamper evidence do not fail from text-mode reinterpretation.
 
 ### Security
 

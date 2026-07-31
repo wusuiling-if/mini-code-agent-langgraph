@@ -115,7 +115,7 @@ def _content_snapshot(root: Path) -> WorkspaceSnapshot:
 
 
 def _read_private_bytes(path: Path, label: str) -> bytes:
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:

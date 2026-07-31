@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import mini_code_agent.executor as executor_module
+import mini_code_agent.receipt as receipt_module
 from mini_code_agent.executor import BashExecutor
 from mini_code_agent.security import SafeWorkspace
 from mini_code_agent.utils import command_from_argv
@@ -40,8 +41,28 @@ def test_windows_local_commands_use_cmd_exe(
         "/d",
         "/s",
         "/c",
-        "py -m pytest -q",
+        '"py -m pytest -q"',
     ]
+
+
+def test_windows_cmd_wrapper_preserves_nested_argument_quotes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    executor = BashExecutor(tmp_path, sandbox_mode="none")
+    monkeypatch.setattr(executor_module, "_is_windows_platform", lambda: True)
+    monkeypatch.setattr(
+        executor,
+        "_trusted_executable",
+        lambda name: r"C:\Windows\System32\cmd.exe"
+        if name in {"cmd.exe", "cmd"}
+        else "",
+    )
+    command = command_from_argv(
+        [r"C:\Python\python.exe", "-c", "from value import answer; assert answer == 42"],
+        platform_name="nt",
+    )
+
+    assert executor._command_argv(command)[-1] == f'"{command}"'
 
 
 def test_windows_docker_commands_keep_container_posix_shell(
@@ -156,3 +177,14 @@ def test_transaction_core_import_does_not_load_agent_contracts():
     assert "mini_code_agent.contracts" not in modules
     assert "mini_code_agent.agent" not in modules
     assert "langgraph" not in modules
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows binary I/O")
+def test_windows_receipt_key_round_trips_control_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    key = b"\x1a" + bytes(range(1, 32))
+    monkeypatch.setattr(receipt_module.secrets, "token_bytes", lambda _size: key)
+
+    assert receipt_module._load_or_create_key(tmp_path) == key
+    assert receipt_module._load_existing_key(tmp_path) == key

@@ -220,7 +220,7 @@ def _key_path(state_root: Path) -> Path:
 def _load_or_create_key(state_root: Path) -> bytes:
     state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     key_path = _key_path(state_root)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
@@ -231,10 +231,14 @@ def _load_or_create_key(state_root: Path) -> bytes:
     try:
         if hasattr(os, "fchmod"):
             os.fchmod(descriptor, 0o600)
-        os.write(descriptor, key)
-        os.fsync(descriptor)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(key)
+            handle.flush()
+            os.fsync(handle.fileno())
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
     return key
 
 
@@ -250,7 +254,7 @@ def _load_existing_key(state_root: Path) -> bytes:
 
 
 def _read_private_bytes(path: Path, label: str) -> bytes:
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
