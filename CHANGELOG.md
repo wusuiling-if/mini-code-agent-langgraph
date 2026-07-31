@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- Added `mca login` and `mca logout` for hidden terminal credential entry and private per-user storage, plus an automatic login prompt when an interactive agent starts without credentials.
+
+### Changed
+
+- Kept environment variables and `--env-file` for automation while removing manual env-file editing from the default provider setup path.
+
 ## [0.4.0] - 2026-07-31
 
 ### Added
