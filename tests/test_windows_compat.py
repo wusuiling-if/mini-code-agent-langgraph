@@ -62,7 +62,12 @@ def test_windows_cmd_wrapper_preserves_nested_argument_quotes(
         platform_name="nt",
     )
 
-    assert executor._command_argv(command)[-1] == f'"{command}"'
+    argv = executor._command_argv(command)
+    assert argv[-1] == f'"{command}"'
+    serialized = executor_module._popen_command(argv)
+    assert isinstance(serialized, str)
+    assert serialized.endswith(f' /d /s /c "{command}"')
+    assert '\\"from value import answer' not in serialized
 
 
 def test_windows_docker_commands_keep_container_posix_shell(

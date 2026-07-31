@@ -89,6 +89,16 @@ def _is_windows_platform() -> bool:
     return os.name == "nt"
 
 
+def _popen_command(argv: list[str]) -> list[str] | str:
+    if (
+        _is_windows_platform()
+        and len(argv) == 5
+        and argv[1:4] == ["/d", "/s", "/c"]
+    ):
+        return f"{subprocess.list2cmdline(argv[:4])} {argv[4]}"
+    return argv
+
+
 @dataclass(frozen=True)
 class _DockerRunMetadata:
     executable: str
@@ -981,7 +991,7 @@ class CommandExecutor:
             deferred_signal: _TerminationSignal | None = None
             try:
                 process = subprocess.Popen(
-                    wrapped_argv,
+                    _popen_command(wrapped_argv),
                     shell=False,
                     cwd=self.cwd,
                     env=self._subprocess_env(),
