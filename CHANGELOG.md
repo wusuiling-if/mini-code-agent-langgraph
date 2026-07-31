@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-31
+
 ### Added
 
 - Added `mca tx run/resume/status/receipt/commit/abort`, which executes coding runs in an isolated Git worktree, persists a tool-access WAL and read/write sets, and exposes an explicit verified `prepare` followed by conflict-checked `commit`.
@@ -14,6 +16,10 @@ All notable changes to this project are documented in this file. The format foll
 
 - Split the framework-independent transaction state machine from the Agent tool adapter. `transaction.py` no longer imports LangGraph or Agent contracts, while `transaction_adapter.py` owns tool-call auditing.
 - Generalized `BashExecutor` internally to the platform-aware `CommandExecutor`; the former name and the `bash` tool identifier remain compatibility aliases.
+
+### Fixed
+
+- Preserved Windows CRLF normalization during isolated Git inspection so a clean worktree is not rejected when the index stores normalized LF content.
 
 ### Security
 

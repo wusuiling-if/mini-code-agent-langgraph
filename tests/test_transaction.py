@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import mini_code_agent.transaction as transaction_module
 from mini_code_agent.contracts import ToolResult
 from mini_code_agent.receipt import ReceiptError
 from mini_code_agent.transaction import TransactionError, TransactionStore
@@ -90,6 +91,27 @@ def test_transaction_isolates_then_commits_exact_prepared_state(tmp_path: Path):
     assert (source / "new.py").read_text(encoding="utf-8") == "NEW = True\n"
     assert (source / "ignored.txt").read_text(encoding="utf-8") == "local cache\n"
     assert not workspace.exists()
+
+
+def test_windows_crlf_worktree_is_clean_when_index_is_normalized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "repo"
+    source.mkdir()
+    _git(source, "init")
+    _git(source, "config", "user.email", "transaction@example.invalid")
+    _git(source, "config", "user.name", "Transaction Test")
+    (source / "app.py").write_bytes(b"VALUE = 1\r\n")
+    _git(source, "-c", "core.autocrlf=true", "add", "app.py")
+    _git(source, "commit", "-m", "baseline")
+    monkeypatch.setattr(transaction_module, "_is_windows_platform", lambda: True)
+
+    store = TransactionStore(tmp_path / "state")
+    manifest = store.create(source, task="verify Windows line endings")
+
+    assert manifest["status"] == "open"
+    assert (source / "app.py").read_bytes() == b"VALUE = 1\r\n"
+    store.abort(manifest["id"])
 
 
 def test_commit_refuses_concurrent_source_change(tmp_path: Path):

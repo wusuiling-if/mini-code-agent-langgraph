@@ -69,6 +69,10 @@ def _git_env() -> dict[str, str]:
     }
 
 
+def _is_windows_platform() -> bool:
+    return os.name == "nt"
+
+
 def _git(
     source: Path,
     *args: str,
@@ -82,6 +86,7 @@ def _git(
         "core.fsmonitor=false",
         "-c",
         "core.pager=cat",
+        *(["-c", "core.autocrlf=true"] if _is_windows_platform() else []),
         *args,
     ]
     result = subprocess.run(
