@@ -1,10 +1,12 @@
-# mini-code-agent-langgraph
+# Transactional Agent Runtime
 
 [English](README.md)
 
-> **一个小型事务型 Coding Agent Runtime：隔离、验证、认证，再提交。**
+> **Agent 补丁验证并确认可提交之前，不污染源工作区。**
 
-项目现在专攻一个机制：让 Agent 在隔离 Git 事务中修改代码，把补丁与验证证据绑定，并且只有显式、无冲突的 commit 才能更新源工作区。LangGraph 是随附的 Agent Loop 适配器，不是事务内核本身。界面仍是单进程的行式 CLI / REPL，而不是全屏 TUI。
+Coding Agent 通常直接修改开发者正在使用的 checkout。失败的运行、过期的测试结果、并发修改或进程中断，都可能让源代码停在含义不明的中间状态。Transactional Agent Runtime 为 Agent 创建隔离 Git worktree，并把补丁处理为 prepare/commit 事务。
+
+Runtime 只有在验证结果绑定到当前工作区、prepare 证据通过认证、且 commit 时源工作区仍无冲突后，才会更新源 checkout。LangGraph 是随附的 Agent Loop 适配器，不是事务内核。
 
 [![tests](https://github.com/wusuiling-if/mini-code-agent-langgraph/actions/workflows/tests.yml/badge.svg)](https://github.com/wusuiling-if/mini-code-agent-langgraph/actions/workflows/tests.yml)
 [![Python 3.10–3.13 tested](https://img.shields.io/badge/Python_tested-3.10%E2%80%933.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -12,25 +14,44 @@
 
 [安全策略](SECURITY.md) · [贡献指南](CONTRIBUTING.md) · [更新记录](CHANGELOG.md)
 
-## 30 秒体验（无需 API Key）
+## 先看事务（无需 API Key）
 
 ```bash
 python -m pip install mini-code-agent-langgraph
-mca demo
+mca tx demo
 ```
 
-`mca demo` 在系统临时目录创建并修复一个确定性的 calculator fixture；它不会修改当前 clone，也不会连接模型服务。准备在真实仓库运行前，可先执行只读诊断：
+Demo 会运行两个确定性事务：第一个证明验证后的补丁在 commit 前不会修改源工作区；第二个注入并发修改，并证明 commit 会拒绝覆盖。Linux、macOS 和 Windows 输出相同的行式机器可读结果。
+
+## 核心保证
+
+- **prepare 不污染源仓库：** Agent 工具和验证都在隔离 worktree 运行。
+- **验证绑定：** 通过的 checks 绑定到精确的 prepare 工作区指纹；之后的任何变化都会使其失效。
+- **篡改可检测：** 本机 HMAC receipt 绑定 baseline、补丁、验证、trajectory、访问日志和工作区指纹。
+- **冲突即拒绝：** 源 `HEAD` 或工作区改变、prepare 工作区改变、补丁不匹配时，commit 均 fail closed。
+
+## 明确限制
+
+- 事务要求干净的 Git worktree，私有运行状态必须在源仓库之外。
+- 当前按整个工作区检测冲突；即使无关的并发修改也会拒绝，而不会自动合并。
+- Receipt 是本机篡改证据，不是可移植签名，也不证明测试完整或补丁正确。
+- 原生 Windows 没有内置隔离后端；`--sandbox auto` 需要 Docker，`--sandbox none` 是显式关闭隔离。
+- commit 前的短暂检查不是覆盖所有外部写入者的文件系统级锁。
+
+## 在真实仓库运行
 
 ```bash
-mca doctor --cwd /path/to/repo --sandbox auto --provider auto
-mca sandbox probe --sandbox auto
+mca tx run "Fix the failing tests" \
+  --cwd /path/to/clean/git/repo \
+  --model deepseek \
+  --check tests "pytest -q"
+
+mca tx status TRANSACTION_ID
+mca tx receipt TRANSACTION_ID
+mca tx commit TRANSACTION_ID
 ```
 
-这条无 Key 诊断会把 provider 记为 warning 而不是失败。`mca demo` 支持 macOS、Linux 和原生 Windows；Windows 项目若依赖 POSIX 命令，可继续使用 WSL2。
-
-`doctor` 只静态检查 sandbox 可执行文件是否在 PATH。`run` 和启用了编码能力的 `chat` 会话会在启动时执行权威后端启动检查；这里“启用编码能力”指启动时传入了 `--test-command` 或 `--check`。未提供这两种验证形式的纯 `/ask` 会话会跳过该检查，因为它不能运行测试、shell 或编码工具。`doctor` 只检查当前进程环境中是否存在 provider key，不会打印 key 值；对于私有 env 文件，它只检查元数据而不会打开文件。
-
-`mca sandbox probe` 会在不需要 provider key、也不接触目标仓库的前提下创建可丢弃数据，并检查工作区写入以及后端特定的外部写入、Unix socket 和网络边界。原生后端必须先精确读到宿主 sentinel，并且只有修改被 `EPERM`、`EACCES` 或 `EROFS` 阻止时才返回 probe 保留的证据退出码；Docker 必须看不到该 sentinel，并另外报告 `/` 挂载的 `ST_RDONLY` 标志。其他正数退出码、启动失败、异常和超时均视为失败，而不是拒绝证据。`bwrap` 与 Docker 必须隐藏受控及已知的宿主 Unix socket；`sandbox-exec` 可以看到路径，但连接必须被拒绝。网络检查先对 TEST-NET 地址尝试不发送数据包的 UDP `connect`，仅在进程无法取得或使用出站路由时继续要求受控 loopback TCP 连接被拒绝。每项检查输出一行 `[PASS]` 或 `[FAIL]`；`--sandbox none` 会被拒绝，因为它不能证明隔离。该 probe 有超时边界，可用于验证本机配置，但全部通过也只证明这些检查，并不代表任意不可信代码都是安全的。
+事务生命周期、receipt 字段、恢复和失败行为见 [事务协议](docs/transaction-protocol.md)。Provider、doctor、Agent Loop 和 sandbox 是次级集成，操作细节见 [Runtime Operations](docs/runtime-operations.md) 与 [Sandboxing](docs/sandboxing.md)。
 
 ## 安全与可靠性边界
 
