@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import shlex
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,12 +26,17 @@ from mini_code_agent.agent import (
     execute_tool_batch,
 )
 from mini_code_agent.chat import MAX_PERSISTED_EVENTS, ConversationalCodeAgent, TurnResult
+from mini_code_agent.checks import (
+    VerificationCheck,
+    VerificationCheckEvidence,
+)
 from mini_code_agent.cli import (
     ChatAccessController,
     _git_dirty,
     _load_runtime_env,
     build_parser,
 )
+from mini_code_agent.contracts import ToolResult
 from mini_code_agent.executor import BashExecutor
 from mini_code_agent.model import create_model
 from mini_code_agent.trajectory import (
@@ -47,6 +54,42 @@ def tool_call(name: str, call_id: str, args: dict | None = None) -> dict:
         "id": call_id,
         "type": "tool_call",
     }
+
+
+def test_bwrap_uses_private_runtime_namespaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executor = BashExecutor(tmp_path, sandbox_mode="bwrap")
+    monkeypatch.setattr(
+        executor,
+        "_trusted_executable",
+        lambda name: "/usr/bin/bwrap" if name == "bwrap" else "",
+    )
+
+    argv = executor._sandboxed_argv(["/bin/sh", "-c", ":"])
+
+    assert "--unshare-all" in argv
+    assert argv[argv.index("--tmpfs", argv.index("--unshare-all")) + 1] == "/run"
+
+
+def test_macos_profile_does_not_allow_shared_tmp_writes(tmp_path: Path) -> None:
+    profile = BashExecutor(tmp_path, sandbox_mode="sandbox-exec")._sandbox_profile()
+
+    assert '(allow file-write* (subpath "/tmp"))' not in profile
+    assert '(allow file-write* (subpath "/private/tmp"))' not in profile
+
+
+def test_macos_sandbox_allows_private_runtime_tmp_writes(tmp_path: Path) -> None:
+    executor = BashExecutor(tmp_path, sandbox_mode="sandbox-exec")
+    if not executor._trusted_executable("sandbox-exec"):
+        pytest.skip("sandbox-exec is unavailable")
+
+    result = executor._run_argv(
+        ["/bin/sh", "-c", 'printf ok > "$TMPDIR/sandbox-write"']
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert (executor._runtime_root / "tmp" / "sandbox-write").read_text() == "ok"
 
 
 def test_verification_fingerprint_covers_modes_symlinks_and_dependency_dirs(
@@ -85,6 +128,51 @@ def test_run_mode_cannot_submit_without_authoritative_verification(tmp_path: Pat
 
     assert not outcome.submitted
     assert outcome.calls[0].result.exception_info == "VerificationRequired"
+
+
+def test_matrix_pass_then_edit_in_one_batch_blocks_submit(tmp_path: Path):
+    (tmp_path / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
+    executor = BashExecutor(
+        tmp_path,
+        approval_mode="yolo",
+        sandbox_mode="none",
+        verification_checks=(
+            VerificationCheck(
+                "tests",
+                f"{shlex.quote(sys.executable)} -c 'print(\"Ran 1 test\")'",
+            ),
+        ),
+    )
+    baseline = capture_workspace_fingerprint(executor)
+    gate = VerificationGate.create(baseline, require_verification=True)
+
+    outcome = execute_tool_batch(
+        executor,
+        [
+            {"name": "run_tests", "args": {}, "id": "checks"},
+            {
+                "name": "apply_patch",
+                "args": {
+                    "path": "value.py",
+                    "old": "VALUE = 1",
+                    "new": "VALUE = 2",
+                },
+                "id": "edit",
+            },
+            {
+                "name": "submit",
+                "args": {"summary": "too early"},
+                "id": "submit",
+            },
+        ],
+        gate,
+    )
+    results = {call.tool_call_id: call.result for call in outcome.calls}
+
+    assert results["checks"].returncode == 0
+    assert results["edit"].returncode == 0
+    assert results["submit"].blocked is True
+    assert results["submit"].exception_info == "VerificationRequired"
 
 
 class FailedTestThenProseModel:
@@ -258,6 +346,156 @@ def test_chat_cli_prints_structured_turn_and_returns_to_ask_after_submit(
     assert "mode=/ask (coding turn submitted; use /code for another coding task)" in output
     assert created["coding_mode"] is True
     assert created["access"].mode == "ask"
+    assert created["closed"] is True
+
+
+def test_run_agent_passes_named_checks_to_the_executor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    created: dict[str, object] = {}
+
+    class FakeExecutor:
+        def __init__(self, cwd: Path, **kwargs):
+            self.cwd = Path(cwd)
+            created["executor_kwargs"] = kwargs
+
+    class FakeAgent:
+        def __init__(self, model, executor, **kwargs):
+            created["agent_executor"] = executor
+
+        def run(self, task: str, *, resume_data=None):
+            return {
+                "exit_status": "Submitted",
+                "workspace_changes": {
+                    "created": [],
+                    "deleted": [],
+                    "modified": [],
+                },
+                "sandbox": "disabled",
+                "submission": "",
+                "events": [],
+            }
+
+    monkeypatch.setattr(cli_module, "_load_runtime_env", lambda _path: None)
+    monkeypatch.setattr(cli_module, "_model_from_args", lambda _args: object())
+    monkeypatch.setattr(
+        cli_module, "_require_working_sandbox", lambda _executor: None
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_resume_output_path",
+        lambda _resume, _output, _kind: tmp_path / "run.json",
+    )
+    monkeypatch.setattr(cli_module, "_load_bash_executor", lambda: FakeExecutor)
+    monkeypatch.setattr(cli_module, "_load_mini_code_agent", lambda: FakeAgent)
+
+    args = build_parser().parse_args(
+        [
+            "run",
+            "task",
+            "--cwd",
+            str(tmp_path),
+            "--model",
+            "deepseek",
+            "--check",
+            "tests",
+            "pytest -q",
+            "--check",
+            "lint",
+            "ruff check .",
+            "--yes",
+            "--sandbox",
+            "none",
+            "--allow-dirty",
+        ]
+    )
+
+    assert cli_module.run_agent(args) == 0
+    kwargs = created["executor_kwargs"]
+    assert kwargs["default_test_command"] is None
+    assert [item.name for item in kwargs["verification_checks"]] == [
+        "tests",
+        "lint",
+    ]
+
+
+def test_chat_command_named_check_enables_code_and_sandbox_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    created: dict[str, object] = {}
+    sandbox_probes: list[object] = []
+
+    class FakeExecutor:
+        def __init__(self, cwd: Path, **kwargs):
+            self.cwd = Path(cwd)
+            created["executor"] = self
+            created["executor_kwargs"] = kwargs
+
+    class FakeSession:
+        def __init__(self, model, executor, **kwargs):
+            created["access"] = executor
+
+        def respond_turn(self, user_text: str, *, coding_mode: bool):
+            created["turn"] = (user_text, coding_mode)
+            return TurnResult(
+                text="done",
+                status="submitted",
+                completed=True,
+                verified=True,
+                steps=1,
+            )
+
+        def close(self):
+            created["closed"] = True
+
+    class TtyInput:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    inputs = iter(["/code fix it", "/exit"])
+    monkeypatch.setattr(cli_module.sys, "stdin", TtyInput())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
+    monkeypatch.setattr(cli_module, "_load_runtime_env", lambda _path: None)
+    monkeypatch.setattr(cli_module, "_model_from_args", lambda _args: object())
+    monkeypatch.setattr(cli_module, "_load_bash_executor", lambda: FakeExecutor)
+    monkeypatch.setattr(
+        cli_module, "_load_conversational_code_agent", lambda: FakeSession
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_require_working_sandbox",
+        sandbox_probes.append,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_resume_output_path",
+        lambda _resume, _output, _kind: tmp_path / "session.chat.json",
+    )
+    args = build_parser().parse_args(
+        [
+            "chat",
+            "--cwd",
+            str(tmp_path),
+            "--model",
+            "deepseek",
+            "--check",
+            "tests",
+            "pytest -q",
+            "--yes",
+            "--sandbox",
+            "none",
+            "--allow-dirty",
+        ]
+    )
+
+    assert cli_module.chat_command(args) == 0
+    kwargs = created["executor_kwargs"]
+    assert kwargs["default_test_command"] is None
+    assert [item.name for item in kwargs["verification_checks"]] == ["tests"]
+    assert sandbox_probes == [created["executor"]]
+    assert created["turn"][1] is True
+    assert created["access"]._coding_enabled is True
     assert created["closed"] is True
 
 
@@ -676,6 +914,104 @@ def test_run_checkpoint_can_resume_from_last_safe_boundary(
     assert resumed["steps"] == 3
 
 
+def test_resume_discards_prior_matrix_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("MCA_STATE_DIR", str(tmp_path / "state"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
+    trajectory_path = tmp_path / "resume.json"
+    check = VerificationCheck(
+        "tests",
+        f"{shlex.quote(sys.executable)} -c 'print(\"Ran 1 test\")'",
+    )
+
+    class CheckOnceModel:
+        def bind_tools(self, tools):
+            return self
+
+        def invoke(self, messages):
+            return AIMessage(
+                content="verify",
+                tool_calls=[tool_call("run_tests", "initial-check")],
+            )
+
+    class SubmitThenCheckAndSubmitModel:
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, tools):
+            return self
+
+        def invoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(
+                    content="try stale submit",
+                    tool_calls=[tool_call("submit", "stale-submit")],
+                )
+            if self.calls == 2:
+                return AIMessage(
+                    content="verify again",
+                    tool_calls=[tool_call("run_tests", "fresh-check")],
+                )
+            return AIMessage(
+                content="submit",
+                tool_calls=[tool_call("submit", "submit")],
+            )
+
+    first = MiniCodeAgent(
+        CheckOnceModel(),
+        BashExecutor(
+            repo,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            verification_checks=(check,),
+        ),
+        max_steps=1,
+        trajectory_path=trajectory_path,
+        quiet=True,
+    ).run("verify")
+    checkpoint_steps = first["steps"]
+    assert first["verification_status"] == "passed"
+
+    resumed = MiniCodeAgent(
+        SubmitThenCheckAndSubmitModel(),
+        BashExecutor(
+            repo,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            verification_checks=(check,),
+        ),
+        max_steps=4,
+        trajectory_path=trajectory_path,
+        quiet=True,
+    ).run(resume_data=load_trajectory(trajectory_path))
+    resumed_events = [
+        event
+        for event in resumed["events"]
+        if int(event.get("step", 0)) > checkpoint_steps
+    ]
+    tool_events = [
+        event
+        for event in resumed_events
+        if event.get("type") == "tool"
+    ]
+    assert [event["tool"] for event in tool_events] == [
+        "submit",
+        "run_tests",
+        "submit",
+    ]
+    stale_submit, fresh_check, accepted_submit = tool_events
+
+    assert stale_submit["blocked"] is True
+    assert stale_submit["exception_info"] == "VerificationRequired"
+    assert fresh_check["verification_checks"][0]["name"] == "tests"
+    assert accepted_submit["submitted"] is True
+    assert resumed["exit_status"] == "Submitted"
+
+
 class CountingChatModel:
     def bind_tools(self, tools):
         return self
@@ -893,3 +1229,127 @@ def test_docker_sandbox_uses_the_configured_prepulled_image(
     assert "--pull=never" in argv
     assert "local/mca-node:20" in argv
     assert argv[-2:] == ["node", "--version"]
+
+
+def test_matrix_uses_the_same_trusted_ignore_paths_inside_executor_and_gate(
+    tmp_path: Path,
+):
+    artifact = tmp_path / "run.json"
+    command = (
+        f"{shlex.quote(sys.executable)} -c "
+        + shlex.quote(
+            "from pathlib import Path; "
+            "Path('run.json').write_text('runtime artifact'); "
+            "print('check passed')"
+        )
+    )
+    executor = BashExecutor(
+        tmp_path,
+        approval_mode="yolo",
+        sandbox_mode="none",
+        verification_checks=(VerificationCheck("tests", command),),
+    )
+    baseline = capture_workspace_fingerprint(
+        executor, ignore_paths={artifact}
+    )
+    gate = VerificationGate.create(baseline, require_verification=True)
+
+    outcome = execute_tool_batch(
+        executor,
+        [{"name": "run_tests", "args": {}, "id": "checks"}],
+        gate,
+        ignore_paths={artifact},
+    )
+    result = outcome.calls[0].result
+
+    assert artifact.read_text(encoding="utf-8") == "runtime artifact"
+    assert result.returncode == 0
+    assert result.verification_boundary_checked is True
+    assert result.verification_fingerprint == baseline
+    assert gate.status == "passed"
+
+
+@pytest.mark.parametrize(
+    ("matrix_evidence", "internal_fingerprint", "post_fingerprint"),
+    [(True, "f0", "f1"), (True, "", "f0"), (False, "", "f0")],
+    ids=("matrix-different", "matrix-missing", "legacy-missing"),
+)
+def test_verification_handoff_requires_matching_internal_fingerprint(
+    tmp_path: Path,
+    matrix_evidence: bool,
+    internal_fingerprint: str,
+    post_fingerprint: str,
+):
+    artifact = tmp_path / "run.json"
+
+    class IdentityRedactor:
+        def redact_text(self, value: str) -> str:
+            return value
+
+        def redact_data(self, value):
+            return value
+
+    class HandoffExecutor:
+        cwd = tmp_path
+        redactor = IdentityRedactor()
+
+        def __init__(self):
+            self.captures = 0
+            self.received_args = None
+
+        def workspace_fingerprint(self, *, ignore_paths=None):
+            self.captures += 1
+            return "f0" if self.captures == 1 else post_fingerprint
+
+        def execute_tool(self, name: str, args: dict) -> ToolResult:
+            self.received_args = args
+            return ToolResult(
+                tool=name,
+                output="passed",
+                returncode=0,
+                duration_ms=1,
+                verification_checks=(
+                    (
+                        VerificationCheckEvidence(
+                            name="tests", returncode=0, duration_ms=1
+                        ),
+                    )
+                    if matrix_evidence
+                    else ()
+                ),
+                verification_boundary_checked=not matrix_evidence,
+                verification_fingerprint=internal_fingerprint,
+            )
+
+        def sandbox_status(self) -> str:
+            return "fake"
+
+    executor = HandoffExecutor()
+    gate = VerificationGate.create("f0", require_verification=True)
+    outcome = execute_tool_batch(
+        executor,
+        [
+            {
+                "name": "run_tests",
+                "args": {"_verification_ignore_paths": ["malicious"]},
+                "id": "checks",
+            },
+            {
+                "name": "submit",
+                "args": {"summary": "must fail"},
+                "id": "submit",
+            },
+        ],
+        gate,
+        ignore_paths={artifact},
+    )
+    results = {call.tool_call_id: call.result for call in outcome.calls}
+
+    assert executor.received_args == {
+        "_verification_ignore_paths": {artifact}
+    }
+    assert results["checks"].exception_info == (
+        "WorkspaceChangedDuringVerification"
+    )
+    assert results["submit"].blocked is True
+    assert gate.status == "failed"

@@ -1,0 +1,69 @@
+name: sandbox
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bwrap:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+      - run: python -m pip install -e ".[dev]"
+      - run: MCA_SANDBOX_BACKEND=bwrap python -m pytest tests/test_sandbox_integration.py -q
+      - run: mca sandbox probe --sandbox bwrap
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - run: docker pull python:3.11-slim
+      - run: python -m pip install -e ".[dev]"
+      - run: MCA_SANDBOX_BACKEND=docker python -m pytest tests/test_sandbox_integration.py -q
+      - run: mca sandbox probe --sandbox docker
+
+  sandbox-exec:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - run: command -v sandbox-exec
+      - run: python -m pip install -e ".[dev]"
+      - run: MCA_SANDBOX_BACKEND=sandbox-exec python -m pytest tests/test_sandbox_integration.py -q
+      - run: mca sandbox probe --sandbox sandbox-exec

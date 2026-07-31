@@ -10,9 +10,49 @@ from langchain_core.messages import AIMessage
 
 from mini_code_agent.agent import MiniCodeAgent
 from mini_code_agent.chat import ConversationalCodeAgent
+from mini_code_agent.checks import VerificationCheck
 from mini_code_agent.executor import BashExecutor
 from mini_code_agent.model import create_model
 from mini_code_agent.trajectory import load_trajectory, summarize_trajectory, undo_trajectory
+
+
+def walk_json_values(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield "key", str(key)
+            yield from walk_json_values(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from walk_json_values(item)
+    elif isinstance(value, str):
+        yield "string", value
+        try:
+            embedded = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if isinstance(embedded, (dict, list)):
+            yield from walk_json_values(embedded)
+
+
+def assert_matrix_internals_absent(
+    payload,
+    *,
+    commands: tuple[str, ...],
+    sentinels: tuple[str, ...],
+    internal_values: tuple[str, ...] = (),
+) -> None:
+    walked = list(walk_json_values(payload))
+    keys = {value for kind, value in walked if kind == "key"}
+    strings = [value for kind, value in walked if kind == "string"]
+
+    forbidden_fields = {
+        "_verification_ignore_paths",
+        "verification_boundary_checked",
+        "verification_fingerprint",
+    }
+    assert forbidden_fields.isdisjoint(keys)
+    for secret in (*forbidden_fields, *commands, *sentinels, *internal_values):
+        assert all(secret not in value for value in strings)
 
 
 def make_calculator_repo(root: Path) -> None:
@@ -216,6 +256,126 @@ class VerificationGateModel:
         )
 
 
+class MatrixModel:
+    def __init__(self):
+        self.step = 0
+
+    def bind_tools(self, tools):
+        return self
+
+    def invoke(self, messages):
+        self.step += 1
+        name, args = {
+            1: ("run_tests", {}),
+            2: ("submit", {"summary": "matrix verified"}),
+        }[self.step]
+        return AIMessage(
+            content=name,
+            tool_calls=[
+                {
+                    "name": name,
+                    "args": args,
+                    "id": f"matrix-{self.step}",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+
+def test_agent_persists_redacted_matrix_evidence_and_submits(tmp_path: Path):
+    trajectory_path = tmp_path / "run.json"
+    tests_sentinel = "MCA_TEST_COMMAND_SENTINEL_7f3a"
+    lint_sentinel = "MCA_LINT_COMMAND_SENTINEL_8b4c"
+    tests_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(f'print({tests_sentinel!r})')}"
+    lint_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(f'print({lint_sentinel!r})')}"
+    agent = MiniCodeAgent(
+        MatrixModel(),
+        BashExecutor(
+            tmp_path,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            verification_checks=(
+                VerificationCheck("tests", tests_command),
+                VerificationCheck("lint", lint_command),
+            ),
+        ),
+        trajectory_path=trajectory_path,
+        quiet=True,
+    )
+
+    trajectory = agent.run("verify")
+    event = next(
+        item for item in trajectory["events"] if item.get("tool") == "run_tests"
+    )
+
+    assert trajectory["exit_status"] == "Submitted"
+    assert [item["name"] for item in event["verification_checks"]] == [
+        "tests",
+        "lint",
+    ]
+    persisted = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    redaction_args = {
+        "commands": (tests_command, lint_command),
+        "sentinels": (tests_sentinel, lint_sentinel),
+        "internal_values": (str(trajectory_path.resolve()),),
+    }
+    assert_matrix_internals_absent(trajectory, **redaction_args)
+    assert_matrix_internals_absent(persisted, **redaction_args)
+    assert_matrix_internals_absent(
+        event,
+        commands=(tests_command, lint_command),
+        sentinels=(tests_sentinel, lint_sentinel),
+        internal_values=(trajectory["verified_fingerprint"],),
+    )
+
+
+def test_chat_event_contains_only_redacted_matrix_evidence(tmp_path: Path):
+    trajectory_path = tmp_path / "chat.json"
+    tests_sentinel = "MCA_CHAT_TEST_SENTINEL_9c5d"
+    lint_sentinel = "MCA_CHAT_LINT_SENTINEL_a6e7"
+    tests_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(f'print({tests_sentinel!r})')}"
+    lint_command = f"{shlex.quote(sys.executable)} -c {shlex.quote(f'print({lint_sentinel!r})')}"
+    session = ConversationalCodeAgent(
+        MatrixModel(),
+        BashExecutor(
+            tmp_path,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            verification_checks=(
+                VerificationCheck("tests", tests_command),
+                VerificationCheck("lint", lint_command),
+            ),
+        ),
+        trajectory_path=trajectory_path,
+        quiet=True,
+    )
+
+    result = session.respond_turn("verify", coding_mode=True)
+    event = next(
+        item for item in session.events if item.get("tool") == "run_tests"
+    )
+
+    assert result.status == "submitted"
+    assert [item["name"] for item in event["verification_checks"]] == [
+        "tests",
+        "lint",
+    ]
+    persisted = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    redaction_args = {
+        "commands": (tests_command, lint_command),
+        "sentinels": (tests_sentinel, lint_sentinel),
+        "internal_values": (str(trajectory_path.resolve()),),
+    }
+    assert_matrix_internals_absent(session.events, **redaction_args)
+    assert_matrix_internals_absent(persisted, **redaction_args)
+    assert_matrix_internals_absent(
+        event,
+        commands=(tests_command, lint_command),
+        sentinels=(tests_sentinel, lint_sentinel),
+        internal_values=(persisted["verified_fingerprint"],),
+    )
+
+
 def test_agent_blocks_submit_until_latest_edit_is_verified(tmp_path: Path):
     (tmp_path / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
     agent = MiniCodeAgent(
@@ -316,3 +476,77 @@ def test_chat_session_can_answer_normally_and_complete_a_coding_turn(tmp_path: P
         for event in session.events
         if event.get("tool") != "run_tests"
     )
+
+
+class MatrixMutationRecoveryModel:
+    def __init__(self):
+        self.step = 0
+
+    def bind_tools(self, tools):
+        return self
+
+    def invoke(self, messages):
+        self.step += 1
+        name, args = {
+            1: ("run_tests", {}),
+            2: (
+                "apply_patch",
+                {"path": "value.py", "old": "VALUE = 2", "new": "VALUE = 1"},
+            ),
+            3: ("run_tests", {}),
+            4: ("submit", {"summary": "recovered and verified"}),
+        }[self.step]
+        return AIMessage(
+            content=name,
+            tool_calls=[
+                {
+                    "name": name,
+                    "args": args,
+                    "id": f"recover-{self.step}",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+
+def test_matrix_mutation_is_refused_then_repaired_and_rerun(
+    tmp_path: Path,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
+    marker = tmp_path / "mutated-once"
+    command = (
+        f"{shlex.quote(sys.executable)} -c "
+        + shlex.quote(
+            "from pathlib import Path; "
+            f"marker=Path({str(marker)!r}); "
+            "value=Path('value.py'); "
+            "first=not marker.exists(); "
+            "value.write_text('VALUE = 2\\n') if first else None; "
+            "marker.write_text('done') if first else None; "
+            "print('Ran 1 test')"
+        )
+    )
+    trajectory = MiniCodeAgent(
+        MatrixMutationRecoveryModel(),
+        BashExecutor(
+            repo,
+            approval_mode="yolo",
+            sandbox_mode="none",
+            verification_checks=(VerificationCheck("tests", command),),
+        ),
+        quiet=True,
+    ).run("verify without accepting check mutations")
+
+    test_events = [
+        event
+        for event in trajectory["events"]
+        if event.get("tool") == "run_tests"
+    ]
+    assert test_events[0]["exception_info"] == (
+        "WorkspaceChangedDuringVerification"
+    )
+    assert test_events[1]["returncode"] == 0
+    assert trajectory["exit_status"] == "Submitted"
+    assert (repo / "value.py").read_text(encoding="utf-8") == "VALUE = 1\n"

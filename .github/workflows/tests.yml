@@ -48,10 +48,19 @@ jobs:
           cache-dependency-path: |
             pyproject.toml
             requirements-ci.txt
-      - run: python -m pip install -e .
+      - run: python -m pip install -e ".[dev]"
       - run: mca --version
       - run: mca --help
       - run: mca doctor --sandbox none
+      - name: Exercise native Windows command and transaction paths
+        if: runner.os == 'Windows'
+        run: python -m pytest -q tests/test_windows_compat.py tests/test_transaction.py
+      - name: Run no-key agent demo on native Windows
+        if: runner.os == 'Windows'
+        run: mca demo
+      - name: Run no-key transaction demo on native Windows
+        if: runner.os == 'Windows'
+        run: mca tx demo
 
   package:
     runs-on: ubuntu-latest

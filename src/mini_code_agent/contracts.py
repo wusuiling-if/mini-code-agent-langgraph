@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from mini_code_agent.checks import VerificationCheckEvidence
 from mini_code_agent.utils import DEFAULT_OUTPUT_LIMIT, truncate_text
 
 
@@ -40,6 +41,9 @@ class ToolResult:
     approved: bool = True
     blocked: bool = False
     tests_run: int | None = None
+    verification_checks: tuple[VerificationCheckEvidence, ...] = ()
+    verification_boundary_checked: bool = False
+    verification_fingerprint: str = ""
 
     def to_observation(self) -> dict:
         data = {
@@ -59,6 +63,10 @@ class ToolResult:
             data["blocked"] = True
         if self.tests_run is not None:
             data["tests_run"] = self.tests_run
+        if self.verification_checks:
+            data["verification_checks"] = [
+                evidence.to_dict() for evidence in self.verification_checks
+            ]
         return data
 
 

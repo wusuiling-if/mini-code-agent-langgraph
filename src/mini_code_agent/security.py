@@ -13,11 +13,24 @@ class SecurityError(Exception):
     """Raised when a tool request violates the workspace safety policy."""
 
 
+def _descriptor_relative_available() -> bool:
+    supports_dir_fd = getattr(os, "supports_dir_fd", set())
+    supports_follow_symlinks = getattr(os, "supports_follow_symlinks", set())
+    return (
+        os.name == "posix"
+        and os.open in supports_dir_fd
+        and os.stat in supports_dir_fd
+        and os.stat in supports_follow_symlinks
+        and os.unlink in supports_dir_fd
+    )
+
+
 class SafeWorkspace:
     def __init__(self, cwd: Path):
         self.cwd = cwd.resolve()
         if not self.cwd.is_dir():
             raise NotADirectoryError(f"workspace does not exist: {cwd}")
+        self._use_descriptor_relative_io = _descriptor_relative_available()
 
     def resolve(self, path: str | Path) -> Path:
         raw_path = Path(path or ".")
@@ -214,6 +227,8 @@ class SafeWorkspace:
         """Safely replace a regular workspace file via directory descriptors."""
 
         resolved = self.resolve(path)
+        if not self._use_descriptor_relative_io:
+            return self._atomic_write_fallback(resolved, text, encoding=encoding)
         relative = resolved.relative_to(self.cwd)
         if not relative.parts:
             raise IsADirectoryError("cannot write the workspace directory")
@@ -244,7 +259,8 @@ class SafeWorkspace:
                     continue
             if fd < 0:
                 raise FileExistsError(f"could not allocate a safe temporary file for {path}")
-            os.fchmod(fd, mode)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, mode)
             with os.fdopen(fd, "w", encoding=encoding, newline="") as handle:
                 fd = -1
                 handle.write(text)
@@ -266,6 +282,12 @@ class SafeWorkspace:
 
     def unlink_file(self, path: str | Path) -> None:
         resolved = self.resolve(path)
+        if not self._use_descriptor_relative_io:
+            metadata = resolved.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                raise SecurityError(f"Refusing to unlink non-regular file: {path}")
+            resolved.unlink()
+            return
         relative = resolved.relative_to(self.cwd)
         if not relative.parts:
             raise IsADirectoryError("cannot unlink the workspace directory")
@@ -286,6 +308,12 @@ class SafeWorkspace:
             return False
 
     def _open_file_fd(self, path: Path, flags: int) -> int:
+        if not self._use_descriptor_relative_io:
+            descriptor = os.open(path, flags)
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                os.close(descriptor)
+                raise SecurityError(f"Not a regular file: {path}")
+            return descriptor
         relative = path.relative_to(self.cwd)
         if not relative.parts:
             raise IsADirectoryError(path)
@@ -320,6 +348,57 @@ class SafeWorkspace:
         except BaseException:
             os.close(fd)
             raise
+
+    def _atomic_write_fallback(
+        self, resolved: Path, text: str, *, encoding: str
+    ) -> Path:
+        """Best available atomic replacement where descriptor-relative I/O is absent."""
+
+        resolved.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        # Re-run containment and symlink checks after creating parent directories.
+        resolved = self.resolve(resolved)
+        try:
+            current = resolved.lstat()
+        except FileNotFoundError:
+            current = None
+        if current is not None and (
+            stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode)
+        ):
+            raise SecurityError(f"Refusing to replace non-regular file: {resolved}")
+        mode = stat.S_IMODE(current.st_mode) if current is not None else 0o644
+        temporary: Path | None = None
+        descriptor = -1
+        try:
+            for _ in range(128):
+                temporary = resolved.parent / (
+                    f".{resolved.name}.{secrets.token_hex(12)}.tmp"
+                )
+                try:
+                    descriptor = os.open(
+                        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode
+                    )
+                    break
+                except FileExistsError:
+                    continue
+            if descriptor < 0 or temporary is None:
+                raise FileExistsError(
+                    f"could not allocate a safe temporary file for {resolved}"
+                )
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, mode)
+            with os.fdopen(descriptor, "w", encoding=encoding, newline="") as handle:
+                descriptor = -1
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, resolved)
+            temporary = None
+            return resolved
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
 
 class SecretRedactor:
@@ -402,7 +481,11 @@ def load_env_file(path: Path) -> None:
         metadata = os.fstat(fd)
         if not stat.S_ISREG(metadata.st_mode):
             raise SecurityError(f"env file is not a regular file: {path}")
-        if hasattr(os, "getuid") and metadata.st_uid == os.getuid():
+        if (
+            hasattr(os, "getuid")
+            and hasattr(os, "fchmod")
+            and metadata.st_uid == os.getuid()
+        ):
             # API credential files should not inherit a permissive umask.
             os.fchmod(fd, 0o600)
         with os.fdopen(fd, "r", encoding="utf-8") as handle:

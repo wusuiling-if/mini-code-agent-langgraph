@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-code-agent-langgraph"
-version = "0.3.2"
-description = "A secure, resumable LangGraph CLI agent for coding and persistent chat."
+version = "0.4.0"
+description = "A compact transactional runtime for verified coding agents."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -13,12 +13,13 @@ license-files = ["LICENSE"]
 authors = [
     { name = "wusuiling-if" },
 ]
-keywords = ["coding-agent", "langgraph", "llm", "cli", "security"]
+keywords = ["coding-agent", "transactions", "verification", "langgraph", "security"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",

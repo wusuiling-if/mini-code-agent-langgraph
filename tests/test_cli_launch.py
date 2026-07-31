@@ -44,6 +44,122 @@ def test_build_parser_does_not_import_heavy_runtime():
     assert modules.isdisjoint(HEAVY_MODULES)
 
 
+def test_parser_accepts_nested_sandbox_probe():
+    args = cli_module.build_parser().parse_args(
+        ["sandbox", "probe", "--sandbox", "docker"]
+    )
+
+    assert args.command == "sandbox"
+    assert args.sandbox_command == "probe"
+    assert args.sandbox == "docker"
+
+
+@pytest.mark.parametrize("command", ["status", "receipt", "commit", "abort"])
+def test_parser_accepts_transaction_state_commands(command: str):
+    args = cli_module.build_parser().parse_args(["tx", command, "0" * 24])
+
+    assert args.command == "tx"
+    assert args.transaction_command == command
+    assert args.transaction_id == "0" * 24
+
+
+def test_parser_accepts_transaction_run_and_resume():
+    parser = cli_module.build_parser()
+    run = parser.parse_args(
+        [
+            "tx",
+            "run",
+            "fix it",
+            "--model",
+            "deepseek",
+            "--test-command",
+            "pytest -q",
+        ]
+    )
+    resume = parser.parse_args(
+        [
+            "tx",
+            "resume",
+            "0" * 24,
+            "--model",
+            "deepseek",
+            "--test-command",
+            "pytest -q",
+        ]
+    )
+
+    assert run.transaction_command == "run"
+    assert run.task == "fix it"
+    assert resume.transaction_command == "resume"
+    assert resume.transaction_id == "0" * 24
+
+
+def test_parser_accepts_transaction_demo():
+    args = cli_module.build_parser().parse_args(["tx", "demo"])
+
+    assert args.command == "tx"
+    assert args.transaction_command == "demo"
+
+
+def test_transaction_demo_proves_commit_and_conflict_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    from mini_code_agent import transaction_cli
+
+    root = tmp_path / "transaction-demo"
+    root.mkdir()
+    monkeypatch.setattr(cli_module, "_create_demo_workspace", lambda: root)
+
+    result = transaction_cli.demo_command(
+        cli_module.build_parser().parse_args(["tx", "demo"])
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "success.source_unchanged_before_commit: true" in output
+    assert "success.commit: committed" in output
+    assert "conflict.commit: refused" in output
+    assert "conflict.user_change_preserved: true" in output
+
+
+def test_parser_rejects_none_for_sandbox_probe():
+    with pytest.raises(SystemExit):
+        cli_module.build_parser().parse_args(
+            ["sandbox", "probe", "--sandbox", "none"]
+        )
+
+
+def test_sandbox_probe_command_renders_checks_and_failure_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    import mini_code_agent.sandbox_probe as probe_module
+    from mini_code_agent.sandbox_probe import SandboxCheck, SandboxProbeReport
+
+    monkeypatch.setattr(
+        probe_module,
+        "run_sandbox_probe",
+        lambda **_kwargs: SandboxProbeReport(
+            backend="fake",
+            checks=(
+                SandboxCheck("workspace_write", True, "allowed"),
+                SandboxCheck("network", False, "reachable"),
+            ),
+        ),
+    )
+    args = cli_module.build_parser().parse_args(["sandbox", "probe"])
+
+    result = cli_module.sandbox_probe_command(args)
+
+    assert result == 1
+    assert capsys.readouterr().out.splitlines() == [
+        "[PASS] workspace_write: allowed",
+        "[FAIL] network: reachable",
+    ]
+
+
 def test_help_does_not_import_agent_runtime():
     modules = _imported_modules(
         "import sys\n"
@@ -73,13 +189,125 @@ def test_mock_model_does_not_import_provider_adapters():
     assert modules.isdisjoint({"langchain_openai", "langchain_deepseek"})
 
 
-def test_run_requires_explicit_model_and_test_command():
+def test_parser_accepts_named_checks_and_preserves_order():
+    args = cli_module.build_parser().parse_args(
+        [
+            "run",
+            "task",
+            "--model",
+            "deepseek",
+            "--check",
+            "tests",
+            "pytest -q",
+            "--check",
+            "lint",
+            "ruff check .",
+        ]
+    )
+
+    combined, explicit = cli_module._configured_verification_checks(
+        args, required=True
+    )
+
+    assert [(item.name, item.command) for item in combined] == [
+        ("tests", "pytest -q"),
+        ("lint", "ruff check ."),
+    ]
+    assert explicit == combined
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["run", "task", "--model", "deepseek"], []),
+        (["chat"], []),
+        (
+            [
+                "chat",
+                "--check",
+                "tests",
+                "pytest -q",
+                "--check",
+                "lint",
+                "ruff check .",
+            ],
+            [("tests", "pytest -q"), ("lint", "ruff check .")],
+        ),
+    ],
+)
+def test_cli_omitted_and_repeated_checks_keep_the_same_configuration_contract(
+    argv: list[str], expected: list[tuple[str, str]]
+):
+    args = cli_module.build_parser().parse_args(argv)
+
+    combined, explicit = cli_module._configured_verification_checks(
+        args, required=False
+    )
+
+    assert [(item.name, item.command) for item in combined] == expected
+    assert [(item.name, item.command) for item in explicit] == expected
+
+
+def test_cli_combines_legacy_test_first_and_rejects_duplicate_tests():
+    parser = cli_module.build_parser()
+    args = parser.parse_args(
+        [
+            "run",
+            "task",
+            "--model",
+            "deepseek",
+            "--test-command",
+            "pytest -q",
+            "--check",
+            "lint",
+            "ruff check .",
+        ]
+    )
+    combined, explicit = cli_module._configured_verification_checks(
+        args, required=True
+    )
+    assert [item.name for item in combined] == ["tests", "lint"]
+    assert [item.name for item in explicit] == ["lint"]
+
+    duplicate = parser.parse_args(
+        [
+            "run",
+            "task",
+            "--model",
+            "deepseek",
+            "--test-command",
+            "pytest -q",
+            "--check",
+            "tests",
+            "other",
+        ]
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        cli_module._configured_verification_checks(duplicate, required=True)
+
+
+def test_run_requires_model_at_parse_time_and_verification_at_runtime():
     parser = cli_module.build_parser()
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["run", "task", "--model", "deepseek"])
-    with pytest.raises(SystemExit):
-        parser.parse_args(["run", "task", "--test-command", "pytest -q"])
+        parser.parse_args(["run", "task", "--check", "tests", "pytest -q"])
+
+    args = parser.parse_args(["run", "task", "--model", "deepseek"])
+    with pytest.raises(RuntimeError, match="--check"):
+        cli_module._configured_verification_checks(args, required=True)
+
+
+def test_chat_named_check_enables_coding_configuration():
+    args = cli_module.build_parser().parse_args(
+        ["chat", "--check", "tests", "pytest -q"]
+    )
+
+    combined, explicit = cli_module._configured_verification_checks(
+        args, required=False
+    )
+
+    assert combined
+    assert explicit[0].name == "tests"
 
 
 def test_run_rejects_scripted_mock_before_runtime_setup():
@@ -136,7 +364,7 @@ def test_cli_reports_package_version_without_a_subcommand():
     )
 
     assert result.returncode == 0
-    assert result.stdout.strip() == "mca 0.3.2"
+    assert result.stdout.strip() == "mca 0.4.0"
     assert result.stderr == ""
 
 

@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 import mini_code_agent.executor as executor_module
+from mini_code_agent.checks import VerificationCheck
+from mini_code_agent.contracts import ToolResult
 from mini_code_agent.executor import BashExecutor, _DockerRunMetadata
 
 
@@ -114,3 +116,126 @@ def test_docker_runs_receive_unique_names_and_cidfiles(
     assert first_cidfile != second_cidfile
     assert first_name.startswith("mca-")
     assert first_cidfile.endswith(".cid")
+
+
+def test_docker_runs_as_the_invoking_user_with_private_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executor = BashExecutor(tmp_path, sandbox_mode="docker")
+    monkeypatch.setattr(
+        executor,
+        "_trusted_executable",
+        lambda name: "/usr/bin/docker" if name == "docker" else "",
+    )
+    monkeypatch.setattr(os, "getuid", lambda: 1234)
+    monkeypatch.setattr(os, "getgid", lambda: 5678)
+
+    argv = executor._sandboxed_argv(["python3", "--version"])
+
+    assert argv[argv.index("--user") + 1] == "1234:5678"
+    assert "HOME=/tmp" in argv
+    assert "TMPDIR=/tmp" in argv
+
+
+def test_matrix_stops_before_the_next_check_after_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executor = BashExecutor(
+        tmp_path,
+        approval_mode="yolo",
+        sandbox_mode="none",
+        verification_checks=(
+            VerificationCheck("slow", "slow command"),
+            VerificationCheck("later", "later command"),
+        ),
+    )
+    calls: list[str] = []
+
+    def fake_run_command(
+        tool: str, command: str, *, args: dict
+    ) -> ToolResult:
+        calls.append(command)
+        return ToolResult(
+            tool=tool,
+            output="timed out",
+            returncode=-1,
+            duration_ms=1,
+            exception_info="TimeoutExpired",
+        )
+
+    monkeypatch.setattr(executor, "_run_command", fake_run_command)
+
+    result = executor.execute_tool("run_tests", {})
+
+    assert calls == ["slow command"]
+    assert result.exception_info == "TimeoutExpired"
+
+
+@pytest.mark.parametrize("returncode", [125, 126, 127])
+def test_matrix_stops_after_docker_wrapper_lifecycle_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+) -> None:
+    secret = "sk-testsecret123456"
+    executor = BashExecutor(
+        tmp_path,
+        approval_mode="yolo",
+        sandbox_mode="docker",
+        verification_checks=(
+            VerificationCheck("wrapper", "first command"),
+            VerificationCheck("later", "later command"),
+        ),
+    )
+    launches: list[list[str]] = []
+
+    class DockerProcess:
+        pid = 12345
+
+        def __init__(self, argv: list[str], stdout) -> None:
+            launches.append(list(argv))
+            self.returncode = returncode if len(launches) == 1 else 0
+            self.stdout = stdout
+
+        def wait(self, timeout=None):
+            self.stdout.write(f"docker failed: {secret}\n".encode())
+            return self.returncode
+
+    monkeypatch.setattr(
+        executor,
+        "_trusted_executable",
+        lambda name: "/usr/bin/docker" if name == "docker" else "",
+    )
+    monkeypatch.setattr(
+        executor_module.subprocess,
+        "Popen",
+        lambda argv, **kwargs: DockerProcess(argv, kwargs["stdout"]),
+    )
+    monkeypatch.setattr(executor, "_terminate_process_group", lambda process: None)
+    monkeypatch.setattr(executor, "_cleanup_docker_run", lambda run: None)
+
+    result = executor.execute_tool("run_tests", {})
+
+    assert len(launches) == 1
+    assert result.returncode == -1
+    assert result.exception_info == "SandboxExecutionError"
+    assert secret not in result.output
+    assert "[REDACTED_SECRET]" in result.output
+
+
+def test_matrix_continues_after_ordinary_exit_matching_docker_reserved_code(
+    tmp_path: Path,
+) -> None:
+    result = BashExecutor(
+        tmp_path,
+        approval_mode="yolo",
+        sandbox_mode="none",
+        verification_checks=(
+            VerificationCheck("ordinary", "exit 125"),
+            VerificationCheck("later", ":"),
+        ),
+    ).execute_tool("run_tests", {})
+
+    assert [item.returncode for item in result.verification_checks] == [125, 0]
+    assert result.returncode == 1
+    assert result.exception_info == "VerificationCheckFailed"

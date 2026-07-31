@@ -17,8 +17,15 @@ from difflib import unified_diff
 from dataclasses import dataclass
 from pathlib import Path
 from shlex import join as shlex_join
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
+from mini_code_agent.checks import (
+    VerificationCheck,
+    VerificationCheckEvidence,
+    VerificationCheckExecution,
+    normalize_verification_checks,
+    run_verification_matrix,
+)
 from mini_code_agent.contracts import ToolResult
 from mini_code_agent.security import SafeWorkspace, SecretRedactor
 from mini_code_agent.utils import DEFAULT_OUTPUT_LIMIT, truncate_text
@@ -32,6 +39,7 @@ MAX_COMMAND_OUTPUT_BYTES = 2 * 1024 * 1024
 MAX_STRUCTURED_EDIT_CHARS = 8 * 1024 * 1024
 PROCESS_TERMINATION_GRACE_SECONDS = 0.5
 DOCKER_CLEANUP_TIMEOUT_SECONDS = 5
+DOCKER_WRAPPER_FAILURE_CODES = frozenset({125, 126, 127})
 
 DANGEROUS_COMMAND_PATTERNS = [
     re.compile(r"(^|[;&|]\s*)rm\s+.*-[^\n]*[rf][^\n]*\s+(/|\$HOME|~)(\s|$)"),
@@ -45,6 +53,9 @@ DANGEROUS_COMMAND_PATTERNS = [
     re.compile(r"(^|[;&|]\s*)dd\s+.*\bof=/dev/"),
     re.compile(r"(curl|wget)[^\n|;]*(\|\s*(sh|bash))"),
     re.compile(r">\s*/(etc|bin|sbin|usr|System|Library)/"),
+    re.compile(r"(?i)(^|[&|]\s*)(del|erase)\s+[^\r\n]*(/[sq]|-[sq])[^\r\n]*\s+[a-z]:\\"),
+    re.compile(r"(?i)(^|[&|]\s*)(rd|rmdir)\s+[^\r\n]*/s[^\r\n]*\s+[a-z]:\\"),
+    re.compile(r"(?i)(^|[&|]\s*)format(\.com)?\s+[a-z]:"),
 ]
 
 SKIP_DIR_NAMES = frozenset({
@@ -74,11 +85,38 @@ SAFE_INHERITED_ENV = frozenset({
 })
 
 
+def _is_windows_platform() -> bool:
+    return os.name == "nt"
+
+
+def _popen_command(argv: list[str]) -> list[str] | str:
+    if (
+        _is_windows_platform()
+        and len(argv) == 5
+        and argv[1:4] == ["/d", "/s", "/c"]
+    ):
+        return f"{subprocess.list2cmdline(argv[:4])} {argv[4]}"
+    return argv
+
+
 @dataclass(frozen=True)
 class _DockerRunMetadata:
     executable: str
     name: str
     cidfile: Path
+
+
+class SandboxExecutionError(RuntimeError):
+    """A sandbox wrapper failed before ordinary command results were available."""
+
+    def __init__(
+        self, backend: str, returncode: int, output: str
+    ) -> None:
+        super().__init__(
+            f"{backend} sandbox lifecycle failed with exit code {returncode}"
+        )
+        self.returncode = returncode
+        self.output = output
 
 
 class _TerminationSignal(BaseException):
@@ -121,7 +159,7 @@ def _defer_sigterm_until_cleanup():
         signal.signal(signal.SIGTERM, previous)
 
 
-class BashExecutor:
+class CommandExecutor:
     def __init__(
         self,
         cwd: Path,
@@ -130,6 +168,7 @@ class BashExecutor:
         approval_mode: Literal["confirm", "yolo"] = "confirm",
         allow_shell: bool = False,
         default_test_command: str | None = None,
+        verification_checks: Sequence[VerificationCheck] = (),
         allow_zero_tests: bool = False,
         sandbox_mode: Literal["auto", "sandbox-exec", "bwrap", "docker", "none"] = "auto",
         docker_image: str = "python:3.11-slim",
@@ -146,6 +185,11 @@ class BashExecutor:
                 raise ValueError("default_test_command must not be blank")
             default_test_command = default_test_command.strip()
         self.default_test_command = default_test_command
+        explicit_checks = tuple(verification_checks)
+        self.verification_checks = normalize_verification_checks(
+            default_test_command, explicit_checks
+        )
+        self._strict_verification_matrix = bool(explicit_checks)
         self.allow_zero_tests = allow_zero_tests
         self.sandbox_mode = sandbox_mode
         if not isinstance(docker_image, str) or not docker_image.strip():
@@ -211,7 +255,19 @@ class BashExecutor:
                 case "git_diff":
                     return self.git_diff(str(args.get("path", "")))
                 case "run_tests":
-                    return self.run_tests(args.get("command"))
+                    raw_ignore_paths = args.get("_verification_ignore_paths")
+                    ignore_paths = (
+                        raw_ignore_paths
+                        if isinstance(raw_ignore_paths, set)
+                        and all(
+                            isinstance(path, Path)
+                            for path in raw_ignore_paths
+                        )
+                        else None
+                    )
+                    return self.run_tests(
+                        args.get("command"), ignore_paths=ignore_paths
+                    )
                 case "submit":
                     return self.submit(str(args.get("summary", "")))
         except Exception as exc:
@@ -230,7 +286,7 @@ class BashExecutor:
             return ToolResult(
                 tool="bash",
                 command=self.redactor.redact_text(command),
-                output="Arbitrary bash is disabled. Use list_files, search_files, read_file, apply_patch, run_tests, git_diff, or submit.",
+                output="Arbitrary shell access is disabled. Use list_files, search_files, read_file, apply_patch, run_tests, git_diff, or submit.",
                 returncode=-1,
                 duration_ms=0,
                 exception_info="ShellDisabled",
@@ -617,49 +673,65 @@ class BashExecutor:
             args={"path": path},
         )
 
-    def run_tests(self, command: str | None = None) -> ToolResult:
-        if self.default_test_command is None:
+    def run_tests(
+        self,
+        command: str | None = None,
+        *,
+        ignore_paths: set[Path] | None = None,
+    ) -> ToolResult:
+        if not self.verification_checks:
             return ToolResult(
                 tool="run_tests",
                 command="",
                 output=(
-                    "No authoritative test command is configured. Restart with "
-                    "--test-command '<command>'."
+                    "No authoritative verification check is configured. Restart "
+                    "with --test-command '<command>' or --check NAME '<command>'."
                 ),
                 returncode=-1,
                 duration_ms=0,
                 exception_info="TestCommandRequired",
                 blocked=True,
             )
-        command = self.default_test_command if command is None else command
-        if not isinstance(command, str) or not command.strip():
-            return ToolResult(
-                tool="run_tests",
-                command="",
-                output="The configured test command must not be blank.",
-                returncode=-1,
-                duration_ms=0,
-                exception_info="InvalidTestCommand",
-                blocked=True,
+        if command is not None:
+            if not isinstance(command, str) or not command.strip():
+                return ToolResult(
+                    tool="run_tests",
+                    command="",
+                    output="The configured test command must not be blank.",
+                    returncode=-1,
+                    duration_ms=0,
+                    exception_info="InvalidTestCommand",
+                    blocked=True,
+                )
+            command = command.strip()
+            legacy_match = (
+                not self._strict_verification_matrix
+                and self.default_test_command is not None
+                and command == self.default_test_command
             )
-        command = command.strip()
-        # Only the user-configured command is authoritative.  Arbitrary shell is
-        # a separate capability and must never let a model manufacture a passing
-        # verification result with e.g. ``run_tests('true')``.
-        if command != self.default_test_command:
-            return ToolResult(
-                tool="run_tests",
-                command=self.redactor.redact_text(command),
-                output=(
-                    "Custom test commands are disabled. Use run_tests without a command "
-                    "or configure --test-command before starting the agent."
-                ),
-                returncode=-1,
-                duration_ms=0,
-                args={"command": self.redactor.redact_text(command)},
-                exception_info="CustomTestCommandDisabled",
-                blocked=True,
+            if not legacy_match:
+                return ToolResult(
+                    tool="run_tests",
+                    command=self.redactor.redact_text(command),
+                    output=(
+                        "Custom verification commands are disabled. Call run_tests "
+                        "without arguments and configure commands before startup."
+                    ),
+                    returncode=-1,
+                    duration_ms=0,
+                    exception_info="CustomTestCommandDisabled",
+                    blocked=True,
+                )
+        if not self._strict_verification_matrix:
+            return self._run_legacy_test(
+                self.default_test_command or "",
+                ignore_paths=ignore_paths or set(),
             )
+        return self._run_test_matrix(ignore_paths=ignore_paths or set())
+
+    def _run_legacy_test(
+        self, command: str, *, ignore_paths: set[Path]
+    ) -> ToolResult:
         blocked_reason = self._blocked_command_reason(command)
         if blocked_reason:
             return ToolResult(
@@ -683,7 +755,59 @@ class BashExecutor:
                 exception_info="User rejected test command.",
                 approved=False,
             )
-        result = self._run_command("run_tests", command, args={"command": command})
+        try:
+            baseline = self.workspace_fingerprint(
+                ignore_paths=ignore_paths
+            ).fingerprint
+        except Exception:
+            return ToolResult(
+                tool="run_tests",
+                command=self.redactor.redact_text(command),
+                output=(
+                    "Workspace fingerprint capture failed before "
+                    "verification."
+                ),
+                returncode=-1,
+                duration_ms=0,
+                args={"command": self.redactor.redact_text(command)},
+                exception_info="WorkspaceFingerprintError",
+            )
+        result = self._apply_test_count(
+            self._run_command(
+                "run_tests", command, args={"command": command}
+            )
+        )
+        try:
+            after = self.workspace_fingerprint(
+                ignore_paths=ignore_paths
+            ).fingerprint
+        except Exception:
+            result.output = truncate_text(
+                f"{result.output}\n\n"
+                "Workspace fingerprint capture failed after verification.",
+                DEFAULT_OUTPUT_LIMIT,
+            )
+            result.returncode = -1
+            result.exception_info = "WorkspaceFingerprintError"
+            return result
+        result.verification_boundary_checked = True
+        if after != baseline:
+            result.output = truncate_text(
+                f"{result.output}\n\n"
+                "Test command changed the fingerprinted workspace; "
+                "submission evidence was not minted.",
+                DEFAULT_OUTPUT_LIMIT,
+            )
+            result.returncode = -1
+            result.exception_info = (
+                "WorkspaceChangedDuringVerification"
+            )
+            return result
+        if result.returncode == 0:
+            result.verification_fingerprint = baseline
+        return result
+
+    def _apply_test_count(self, result: ToolResult) -> ToolResult:
         unittest_match = UNITTEST_COUNT.search(result.output)
         if unittest_match:
             result.tests_run = int(unittest_match.group(1))
@@ -696,6 +820,89 @@ class BashExecutor:
                 result.returncode = 1
                 result.exception_info = "NoTestsCollected"
         return result
+
+    def _run_test_matrix(self, *, ignore_paths: set[Path]) -> ToolResult:
+        for check in self.verification_checks:
+            blocked_reason = self._blocked_command_reason(check.command)
+            if blocked_reason:
+                evidence = VerificationCheckEvidence(
+                    name=check.name,
+                    returncode=-1,
+                    duration_ms=0,
+                    exception_info=blocked_reason,
+                    blocked=True,
+                )
+                return ToolResult(
+                    tool="run_tests",
+                    command="<verification matrix>",
+                    output=f"Verification check {check.name} was blocked by policy.",
+                    returncode=-1,
+                    duration_ms=0,
+                    exception_info=blocked_reason,
+                    blocked=True,
+                    verification_checks=(evidence,),
+                )
+
+        detail = "\n".join(
+            f"{check.name}: {self.redactor.redact_text(check.command)}"
+            for check in self.verification_checks
+        )
+        if self.approval_mode == "confirm" and not self._confirm(
+            "run_tests", detail
+        ):
+            return ToolResult(
+                tool="run_tests",
+                command="<verification matrix>",
+                output="Verification matrix was rejected by the user.",
+                returncode=-1,
+                duration_ms=0,
+                exception_info="User rejected verification matrix.",
+                approved=False,
+            )
+
+        def execute(check: VerificationCheck) -> VerificationCheckExecution:
+            result = self._apply_test_count(
+                self._run_command("run_tests", check.command, args={})
+            )
+            return VerificationCheckExecution(
+                evidence=VerificationCheckEvidence(
+                    name=check.name,
+                    returncode=result.returncode,
+                    duration_ms=result.duration_ms,
+                    tests_run=result.tests_run,
+                    exception_info=(
+                        result.exception_info.partition(":")[0]
+                        if result.exception_info
+                        else ""
+                    ),
+                    blocked=result.blocked,
+                    approved=result.approved,
+                ),
+                output=result.output,
+            )
+
+        matrix = run_verification_matrix(
+            self.verification_checks,
+            capture_fingerprint=lambda: self.workspace_fingerprint(
+                ignore_paths=ignore_paths
+            ).fingerprint,
+            execute_check=execute,
+        )
+        return ToolResult(
+            tool="run_tests",
+            command="<verification matrix>",
+            output=self.redactor.redact_text(matrix.output),
+            returncode=matrix.returncode,
+            duration_ms=sum(
+                item.duration_ms for item in matrix.verification_checks
+            ),
+            exception_info=matrix.exception_info,
+            approved=matrix.approved,
+            blocked=matrix.blocked,
+            verification_checks=matrix.verification_checks,
+            verification_boundary_checked=matrix.returncode == 0,
+            verification_fingerprint=matrix.verification_fingerprint,
+        )
 
     def submit(self, summary: str = "") -> ToolResult:
         submission = summary.strip()
@@ -751,7 +958,18 @@ class BashExecutor:
         return answer in {"y", "yes"}
 
     def _run(self, command: str) -> subprocess.CompletedProcess[str]:
-        return self._run_argv(["/bin/sh", "-c", command])
+        return self._run_argv(self._command_argv(command))
+
+    def _command_argv(self, command: str, *, login: bool = False) -> list[str]:
+        mode = self._selected_sandbox_mode()
+        if mode == "docker" or not _is_windows_platform():
+            return ["/bin/sh", "-lc" if login else "-c", command]
+        executable = self._trusted_executable("cmd.exe") or self._trusted_executable(
+            "cmd"
+        )
+        if not executable:
+            raise RuntimeError("cmd.exe is not available")
+        return [executable, "/d", "/s", "/c", f'"{command}"']
 
     def _run_argv(
         self,
@@ -773,14 +991,25 @@ class BashExecutor:
             deferred_signal: _TerminationSignal | None = None
             try:
                 process = subprocess.Popen(
-                    wrapped_argv,
+                    _popen_command(wrapped_argv),
                     shell=False,
                     cwd=self.cwd,
                     env=self._subprocess_env(),
                     stdout=output,
                     stderr=subprocess.STDOUT,
-                    start_new_session=os.name == "posix",
-                    preexec_fn=self._resource_limiter() if os.name == "posix" else None,
+                    start_new_session=(
+                        os.name == "posix" and not _is_windows_platform()
+                    ),
+                    preexec_fn=(
+                        self._resource_limiter()
+                        if os.name == "posix" and not _is_windows_platform()
+                        else None
+                    ),
+                    creationflags=(
+                        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                        if _is_windows_platform()
+                        else 0
+                    ),
                 )
                 try:
                     with _defer_sigterm_until_cleanup():
@@ -808,16 +1037,34 @@ class BashExecutor:
                 )
             if process is None:
                 raise RuntimeError("command process was not started")
+            if (
+                docker_run is not None
+                and process.returncode in DOCKER_WRAPPER_FAILURE_CODES
+            ):
+                raise SandboxExecutionError(
+                    "docker", process.returncode, stdout
+                )
         return subprocess.CompletedProcess(argv, process.returncode, stdout)
 
     @staticmethod
     def _terminate_process_group(process: subprocess.Popen) -> None:
         """Best-effort, bounded cleanup for the command and all its descendants."""
 
-        if os.name != "posix":
+        if _is_windows_platform() or os.name != "posix":
             try:
                 if process.poll() is None:
-                    process.terminate()
+                    taskkill = shutil.which("taskkill") if _is_windows_platform() else None
+                    if taskkill:
+                        subprocess.run(
+                            [taskkill, "/PID", str(process.pid), "/T", "/F"],
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=PROCESS_TERMINATION_GRACE_SECONDS,
+                            check=False,
+                        )
+                    else:
+                        process.terminate()
                     try:
                         process.wait(timeout=PROCESS_TERMINATION_GRACE_SECONDS)
                     except BaseException:
@@ -917,7 +1164,7 @@ class BashExecutor:
 
     def _sandboxed_command(self, command: str) -> str:
         # Backward-compatible debug helper; execution itself always uses argv.
-        return shlex_join(self._sandboxed_argv(["/bin/sh", "-lc", command]))
+        return shlex_join(self._sandboxed_argv(self._command_argv(command, login=True)))
 
     def _sandboxed_argv(self, argv: list[str]) -> list[str]:
         mode = self._selected_sandbox_mode()
@@ -936,11 +1183,12 @@ class BashExecutor:
                 executable,
                 "--die-with-parent",
                 "--new-session",
-                "--unshare-net",
-                "--unshare-pid",
+                "--unshare-all",
                 "--ro-bind",
                 "/",
                 "/",
+                "--tmpfs",
+                "/run",
                 "--dev",
                 "/dev",
                 "--proc",
@@ -1003,6 +1251,26 @@ class BashExecutor:
                 "2",
                 "--tmpfs",
                 "/tmp:rw,noexec,nosuid,size=256m",
+                *(
+                    [
+                        "--user",
+                        f"{os.getuid()}:{os.getgid()}",
+                        "--env",
+                        "HOME=/tmp",
+                        "--env",
+                        "TMPDIR=/tmp",
+                        "--env",
+                        "PYTHONDONTWRITEBYTECODE=1",
+                        "--env",
+                        "GIT_CONFIG_GLOBAL=/dev/null",
+                        "--env",
+                        "GIT_CONFIG_NOSYSTEM=1",
+                        "--env",
+                        "GIT_TERMINAL_PROMPT=0",
+                    ]
+                    if os.name == "posix"
+                    else []
+                ),
                 "--mount",
                 f"type=bind,src={self.cwd},dst=/workspace",
                 "-w",
@@ -1018,7 +1286,7 @@ class BashExecutor:
 
         home = literal(Path.home().resolve())
         cwd = literal(self.cwd)
-        runtime = literal(self._runtime_root)
+        runtime = literal(self._runtime_root.resolve())
         # Default read access is retained for macOS frameworks and package
         # managers, but the real home directory is hidden except for the target
         # workspace.  HOME itself points at the isolated runtime directory.
@@ -1031,9 +1299,7 @@ class BashExecutor:
             f'(allow file-read* (subpath "{runtime}")) '
             '(deny file-write*) '
             f'(allow file-write* (subpath "{cwd}")) '
-            f'(allow file-write* (subpath "{runtime}")) '
-            '(allow file-write* (subpath "/private/tmp")) '
-            '(allow file-write* (subpath "/tmp"))'
+            f'(allow file-write* (subpath "{runtime}"))'
         )
 
     def _selected_sandbox_mode(self) -> str:
@@ -1043,9 +1309,9 @@ class BashExecutor:
             return self._resolved_sandbox_mode
         if self._sandbox_probe_error:
             raise RuntimeError(self._sandbox_probe_error)
-        if self._trusted_executable("sandbox-exec"):
+        if not _is_windows_platform() and self._trusted_executable("sandbox-exec"):
             return "sandbox-exec"
-        if self._trusted_executable("bwrap"):
+        if not _is_windows_platform() and self._trusted_executable("bwrap"):
             return "bwrap"
         if self._trusted_executable("docker"):
             return "docker"
@@ -1117,7 +1383,8 @@ class BashExecutor:
                     ("bwrap", "bwrap"),
                     ("docker", "docker"),
                 ]
-                if self._trusted_executable(executable)
+                if (mode == "docker" or not _is_windows_platform())
+                and self._trusted_executable(executable)
             ]
             if not candidates:
                 self._sandbox_probe_error = (
@@ -1171,9 +1438,9 @@ class BashExecutor:
             return self._resolved_sandbox_mode
         if self._sandbox_probe_error:
             return "unavailable"
-        if self._trusted_executable("sandbox-exec"):
+        if not _is_windows_platform() and self._trusted_executable("sandbox-exec"):
             return "sandbox-exec"
-        if self._trusted_executable("bwrap"):
+        if not _is_windows_platform() and self._trusted_executable("bwrap"):
             return "bwrap"
         if self._trusted_executable("docker"):
             return "docker"
@@ -1219,6 +1486,11 @@ class BashExecutor:
             if pattern.search(command):
                 return f"Blocked dangerous command pattern: {pattern.pattern}"
         return ""
+
+
+# Backward-compatible public name for existing integrations and trajectories.
+BashExecutor = CommandExecutor
+
 
 def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()

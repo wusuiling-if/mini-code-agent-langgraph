@@ -4,6 +4,75 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-31
+
+### Added
+
+- Added `mca tx run/resume/status/receipt/commit/abort`, which executes coding runs in an isolated Git worktree, persists a tool-access WAL and read/write sets, and exposes an explicit verified `prepare` followed by conflict-checked `commit`.
+- Added HMAC-authenticated prepared-patch receipts binding baseline, patch, verification, trajectory, WAL, and access-set evidence, plus a no-key `mca tx demo` for successful commit and concurrent-conflict refusal.
+- Added native Windows command execution through `cmd.exe`, process-tree cleanup through `taskkill`, cross-platform transaction locks, and Windows CI coverage for both no-key demos.
+
+### Changed
+
+- Split the framework-independent transaction state machine from the Agent tool adapter. `transaction.py` no longer imports LangGraph or Agent contracts, while `transaction_adapter.py` owns tool-call auditing.
+- Generalized `BashExecutor` internally to the platform-aware `CommandExecutor`; the former name and the `bash` tool identifier remain compatibility aliases.
+
+### Fixed
+
+- Preserved Windows CRLF normalization during isolated Git inspection so a clean worktree is not rejected when the index stores normalized LF content.
+- Preserved nested argument quotes through `cmd.exe /s /c`, and stored receipt keys with binary I/O so Windows verification commands and tamper evidence do not fail from text-mode reinterpretation.
+
+### Security
+
+- Transaction commit now fails closed when the source `HEAD` or whole-workspace snapshot changed after begin, when the prepared workspace changed after verification, when workspace changes cannot be represented by the prepared Git patch, or when the private prepared patch fails its recorded SHA-256 integrity check.
+- Transaction state must remain outside the source repository. The initial transaction protocol intentionally rejects all concurrent source-workspace changes; recorded read/write sets are audit evidence and do not yet relax conflict granularity.
+- Receipts provide local tamper evidence under private machine key material; they are not portable third-party attestations and do not prove test completeness or semantic correctness.
+- Native Windows has no built-in strong isolation backend. `--sandbox auto` uses Docker when available; `--sandbox none` is an explicit unisolated opt-out. Structured file operations use containment and symlink checks but cannot provide POSIX descriptor-relative race resistance against concurrent reparse-point changes.
+
+## [0.3.4] - 2026-07-22
+
+### Added
+
+- Added ordered named `--check NAME COMMAND` verification matrices with at most 16 serial checks and additive, bounded, best-effort-redacted per-check evidence.
+
+### Changed
+
+- Refused verification when any named check, or the backward-compatible single `--test-command`, leaves a fingerprinted workspace file persistently changed; generators must run before verification.
+
+### Compatibility
+
+- Preserved stable `--test-command` output and event fields while applying the same fail-closed persisted-mutation rule to the legacy single-check path.
+- Added focused CLI, workflow-policy, hygiene, and end-to-end coverage for named matrices and strict mutation refusal.
+
+### Security
+
+- Documented that boundary fingerprint captures detect persisted changes but are not immutable snapshots, and that trajectory redaction is best effort and trajectories remain sensitive.
+- Kept the TrustBench boundary unchanged: this release adds no TrustBench extraction, adapters, or benchmark dependency, and the existing v0.3.2 offline benchmark contract remains unchanged.
+- Kept the established end-to-end recovery test outside that unchanged v0.3.2 benchmark boundary.
+
+## [0.3.3] - 2026-07-22
+
+### Added
+
+- Added `mca sandbox probe`, a provider-free disposable capability check for workspace writes, backend-specific outside-write and Unix-socket boundaries, denial or unavailability of a usable outbound route, and denial of a controlled TCP connection, plus dedicated real-backend CI that runs automatically on pushes and pull requests.
+
+### Changed
+
+- Hardened Linux `bwrap` with fully unshared namespaces and a read-only host root. The workspace and executor runtime are the only writable host paths; private `/run`, `/tmp`, and home tmpfs mounts are also writable inside the sandbox, with private `/dev` and fresh `/proc` views.
+- Limited macOS `sandbox-exec` writes to the workspace and its private runtime tree, removing shared `/tmp` and `/private/tmp` write exceptions.
+- Changed Docker execution on POSIX to use the invoking numeric UID:GID, a private size-limited `/tmp`, and explicit private `HOME`/`TMPDIR`, Python-bytecode, and Git environment values.
+
+### Security
+
+- Added backend-specific boundary tests and documented that native process-group cleanup remains best effort: a double-fork can escape into a new session, and `sandbox-exec` does not provide PID-namespace, cgroup, or container-equivalent descendant containment.
+- Made probe results require reserved, cause-specific evidence exits: native mutation accepts only `EPERM`, `EACCES`, or `EROFS`, while Docker verifies the root mount's `ST_RDONLY` flag instead of inferring read-only state from a failed write. Other positive exits, negative executor returns, timeouts, exceptions, missing sentinel preconditions, and unavailable or `/tmp`-aliased host temp bases fail closed.
+- A passing capability probe demonstrates only its bounded checks; it is not a guarantee that an arbitrary repository, command, dependency, image, daemon, kernel, or host is safe.
+
+### Compatibility
+
+- Preserved the existing `auto` selection order and explicit backend names. Every Docker image used for coding or tests must provide `/bin/sh`; `mca sandbox probe` additionally requires `python3`. Normal coding runs may still use another pre-pulled custom image when it satisfies the `/bin/sh` requirement.
+- POSIX Docker workspaces now produce files as the invoking host UID:GID rather than container root; images that require root must be adjusted or replaced.
+
 ## [0.3.2] - 2026-07-20
 
 ### Added

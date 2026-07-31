@@ -12,6 +12,7 @@ WORKFLOW_DIRECTORY = ROOT / ".github" / "workflows"
 EXPECTED_WORKFLOWS = {
     "codeql.yml",
     "release.yml",
+    "sandbox.yml",
     "supply-chain.yml",
     "tests.yml",
 }
@@ -28,6 +29,24 @@ APPROVED_ACTIONS = {
 JOB_PERMISSION_EXCEPTIONS = {
     ("codeql.yml", "analysis"): {"contents": "read", "security-events": "write"},
     ("release.yml", "publish"): {"id-token": "write"},
+}
+SANDBOX_JOB_POLICY = {
+    "bwrap": {
+        "runner": "ubuntu-22.04",
+        "backend": "bwrap",
+        "preparation": "sudo apt-get update\nsudo apt-get install -y bubblewrap\n",
+        "preparation_name": "Install bubblewrap",
+    },
+    "docker": {
+        "runner": "ubuntu-latest",
+        "backend": "docker",
+        "preparation": "docker pull python:3.11-slim",
+    },
+    "sandbox-exec": {
+        "runner": "macos-latest",
+        "backend": "sandbox-exec",
+        "preparation": "command -v sandbox-exec",
+    },
 }
 
 
@@ -195,6 +214,173 @@ def _assert_release_permissions_are_narrow(workflow: str) -> None:
     ) == JOB_PERMISSION_EXCEPTIONS[("release.yml", "publish")]
 
 
+def _assert_sandbox_triggers_are_exact(trigger_node: Node) -> None:
+    triggers = _node_mapping(trigger_node, "sandbox.yml triggers")
+    assert set(triggers) == {"push", "pull_request"}, (
+        "sandbox.yml must run only on push and pull_request"
+    )
+    for event in ("push", "pull_request"):
+        event_config = _node_mapping(
+            triggers[event], f"sandbox.yml {event} trigger"
+        )
+        assert set(event_config) == {"branches"}, (
+            f"sandbox.yml {event} trigger must only select branches"
+        )
+        branches = _node_sequence(
+            event_config["branches"], f"sandbox.yml {event} branches"
+        )
+        assert len(branches) == 1
+        branch = branches[0]
+        assert isinstance(branch, ScalarNode)
+        assert branch.tag == "tag:yaml.org,2002:str"
+        assert branch.value == "main"
+
+
+def _sandbox_jobs(workflow: str) -> dict[str, dict[str, Node]]:
+    root, job_nodes = _workflow_nodes(workflow, "sandbox.yml")
+    assert set(root) == {"name", "on", "permissions", "concurrency", "jobs"}, (
+        "sandbox.yml root keys must match the approved structure"
+    )
+    assert _scalar_value(root["name"], "sandbox.yml name") == "sandbox"
+    _assert_sandbox_triggers_are_exact(root["on"])
+    assert set(job_nodes) == set(SANDBOX_JOB_POLICY)
+    return {
+        job_name: _node_mapping(job_node, f"sandbox.yml job {job_name}")
+        for job_name, job_node in job_nodes.items()
+    }
+
+
+def _sandbox_steps(job_name: str, job: dict[str, Node]) -> tuple[dict[str, Node], ...]:
+    assert "steps" in job, f"sandbox.yml job {job_name} must define steps"
+    return tuple(
+        _node_mapping(step_node, f"sandbox.yml job {job_name} step {index + 1}")
+        for index, step_node in enumerate(
+            _node_sequence(job["steps"], f"sandbox.yml job {job_name} steps")
+        )
+    )
+
+
+def _assert_exact_run_step(
+    step: dict[str, Node],
+    command: str,
+    context: str,
+    *,
+    name: str | None = None,
+) -> None:
+    expected_keys = {"run"} if name is None else {"name", "run"}
+    assert set(step) == expected_keys, f"{context} keys must match {expected_keys}"
+    if name is not None:
+        assert _scalar_value(step["name"], f"{context} name") == name
+    assert _scalar_value(step["run"], f"{context} run") == command
+
+
+def _assert_sandbox_checkout_is_hardened(
+    checkout_step: dict[str, Node],
+    job_name: str,
+) -> None:
+    checkout = f"actions/checkout@{APPROVED_ACTIONS['actions/checkout']}"
+    assert "with" in checkout_step, (
+        f"sandbox.yml job {job_name} checkout needs explicit inputs"
+    )
+    assert set(checkout_step) == {"uses", "with"}, (
+        f"sandbox.yml job {job_name} checkout keys must match the approved structure"
+    )
+    assert _scalar_value(
+        checkout_step["uses"], f"sandbox.yml job {job_name} checkout uses"
+    ) == checkout
+    inputs = _node_mapping(
+        checkout_step["with"], f"sandbox.yml job {job_name} checkout inputs"
+    )
+    assert set(inputs) == {"persist-credentials"}, (
+        f"sandbox.yml job {job_name} checkout inputs must only disable credentials"
+    )
+    persist_credentials = inputs["persist-credentials"]
+    assert isinstance(persist_credentials, ScalarNode)
+    assert persist_credentials.tag == "tag:yaml.org,2002:bool"
+    assert persist_credentials.value == "false", (
+        f"sandbox.yml job {job_name} checkout must disable persisted credentials"
+    )
+
+
+def _assert_sandbox_setup_python_is_hardened(
+    setup_step: dict[str, Node],
+    job_name: str,
+) -> None:
+    setup_python = f"actions/setup-python@{APPROVED_ACTIONS['actions/setup-python']}"
+    assert set(setup_step) == {"uses", "with"}, (
+        f"sandbox.yml job {job_name} setup-python keys must match the approved structure"
+    )
+    assert _scalar_value(
+        setup_step["uses"], f"sandbox.yml job {job_name} setup-python uses"
+    ) == setup_python
+    assert _scalar_mapping(
+        setup_step["with"], f"sandbox.yml job {job_name} setup-python inputs"
+    ) == {
+        "python-version": "3.11",
+        "cache": "pip",
+        "cache-dependency-path": "pyproject.toml",
+    }
+
+
+def _assert_sandbox_workflow_is_hardened(workflow: str) -> None:
+    jobs = _sandbox_jobs(workflow)
+    for job_name, policy in SANDBOX_JOB_POLICY.items():
+        job = jobs[job_name]
+        assert set(job) == {"runs-on", "timeout-minutes", "steps"}, (
+            f"sandbox.yml job {job_name} keys must match the approved structure"
+        )
+        assert _scalar_value(
+            job["runs-on"], f"sandbox.yml job {job_name} runs-on"
+        ) == policy["runner"]
+        timeout = job["timeout-minutes"]
+        assert isinstance(timeout, ScalarNode)
+        assert timeout.tag == "tag:yaml.org,2002:int"
+        assert timeout.value == "15"
+        steps = _sandbox_steps(job_name, job)
+        assert len(steps) == 6, f"sandbox.yml job {job_name} must define exactly six steps"
+        _assert_sandbox_checkout_is_hardened(steps[0], job_name)
+        _assert_sandbox_setup_python_is_hardened(steps[1], job_name)
+        _assert_exact_run_step(
+            steps[2],
+            policy["preparation"],
+            f"sandbox.yml job {job_name} preparation",
+            name=policy.get("preparation_name"),
+        )
+        _assert_exact_run_step(
+            steps[3],
+            'python -m pip install -e ".[dev]"',
+            f"sandbox.yml job {job_name} package install",
+        )
+        backend = policy["backend"]
+        _assert_exact_run_step(
+            steps[4],
+            (
+                f"MCA_SANDBOX_BACKEND={backend} python -m pytest "
+                "tests/test_sandbox_integration.py -q"
+            ),
+            f"sandbox.yml job {job_name} integration probe",
+        )
+        _assert_exact_run_step(
+            steps[5],
+            f"mca sandbox probe --sandbox {backend}",
+            f"sandbox.yml job {job_name} CLI probe",
+        )
+        for index, step in enumerate(steps):
+            if "uses" not in step:
+                continue
+            action = _scalar_value(
+                step["uses"], f"sandbox.yml job {job_name} step {index + 1} uses"
+            )
+            assert not action.startswith("actions/upload-artifact@"), (
+                f"sandbox.yml job {job_name} must not upload artifacts"
+            )
+
+    lowered = workflow.lower()
+    assert "${{ secrets." not in lowered
+    assert "workspace" not in lowered
+    assert "trajectory" not in lowered
+
+
 def test_required_supply_chain_files_exist():
     assert {path.name for path in _workflow_paths()} == EXPECTED_WORKFLOWS
     _required_file(".github/dependabot.yml")
@@ -319,6 +505,7 @@ def test_every_job_has_an_explicit_timeout():
         "supply-chain.yml": {"pip-audit": 15, "dependency-review": 15},
         "codeql.yml": {"analysis": 20},
         "release.yml": {"build": 20, "publish": 10},
+        "sandbox.yml": {"bwrap": 15, "docker": 15, "sandbox-exec": 15},
     }
     for workflow_name, expected_jobs in expected_timeouts.items():
         jobs = _job_blocks(_workflow(workflow_name))
@@ -366,6 +553,16 @@ def test_regular_ci_is_main_scoped_and_caches_pip_dependencies():
             assert re.search(r"(?m)^\s+requirements-ci\.txt\s*$", setup_block)
 
 
+def test_cli_smoke_exercises_native_windows_runtime_paths():
+    cli_smoke = _job_blocks(_workflow("tests.yml"))["cli-smoke"]
+    assert "windows-latest" in cli_smoke
+    assert 'python -m pip install -e ".[dev]"' in cli_smoke
+    assert "tests/test_windows_compat.py tests/test_transaction.py" in cli_smoke
+    assert "run: mca demo" in cli_smoke
+    assert "run: mca tx demo" in cli_smoke
+    assert cli_smoke.count("if: runner.os == 'Windows'") >= 3
+
+
 def test_offline_eval_uploads_only_sanitized_json_for_seven_days():
     eval_job = _job_blocks(_workflow("tests.yml"))["offline-eval"]
     output = "artifacts/evals/v0.3.2.json"
@@ -378,6 +575,156 @@ def test_offline_eval_uploads_only_sanitized_json_for_seven_days():
     assert re.search(r"(?m)^          if-no-files-found:\s*error\s*$", upload_step)
     assert "trajectory" not in upload_step.lower()
     assert "workspace" not in upload_step.lower()
+
+
+def test_sandbox_workflow_exercises_real_backends_without_sensitive_artifacts():
+    workflow = _workflow("sandbox.yml")
+    _assert_sandbox_workflow_is_hardened(workflow)
+
+
+def test_sandbox_policy_rejects_disabled_critical_step():
+    workflow = _workflow("sandbox.yml")
+    command = (
+        "MCA_SANDBOX_BACKEND=bwrap python -m pytest "
+        "tests/test_sandbox_integration.py -q"
+    )
+    mutated = workflow.replace(
+        f"      - run: {command}",
+        f"      - if: false\n        run: {command}",
+    )
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError, match="keys must match"):
+        _assert_sandbox_workflow_is_hardened(mutated)
+
+
+def test_sandbox_policy_rejects_command_hidden_in_comment():
+    workflow = _workflow("sandbox.yml")
+    command = "mca sandbox probe --sandbox docker"
+    mutated = workflow.replace(f"      - run: {command}", f"      # {command}")
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
+        _assert_sandbox_workflow_is_hardened(mutated)
+
+
+def test_sandbox_policy_rejects_checkout_with_persisted_credentials():
+    workflow = _workflow("sandbox.yml")
+    hardened_inputs = "        with:\n          persist-credentials: false\n"
+    mutated = workflow.replace(hardened_inputs, "", 1)
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError, match="checkout needs explicit inputs"):
+        _assert_sandbox_workflow_is_hardened(mutated)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "defaults:\n  run:\n    shell: bash\n",
+        "env:\n  PIP_CONFIG_FILE: /tmp/unsafe\n",
+    ],
+)
+def test_sandbox_policy_rejects_root_execution_overrides(override):
+    workflow = _workflow("sandbox.yml")
+    mutated = workflow.replace("name: sandbox\n", f"name: sandbox\n{override}", 1)
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
+        _assert_sandbox_workflow_is_hardened(mutated)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        (
+            "on:\n"
+            "  push:\n"
+            "    branches: [main]\n"
+            "  pull_request:\n"
+            "    branches: [main]\n",
+            "on: workflow_dispatch\n",
+        ),
+        (
+            "  pull_request:\n    branches: [main]\n",
+            "  pull_request:\n"
+            "    branches: [main]\n"
+            "  workflow_dispatch:\n",
+        ),
+        (
+            "  push:\n    branches: [main]\n",
+            "  push:\n    branches: [main]\n    if: false\n",
+        ),
+        (
+            "    branches: [main]\n",
+            '    branches: ["${{ github.ref }}"]\n',
+        ),
+    ],
+    ids=("workflow-dispatch", "extra-trigger", "trigger-if", "branch-expression"),
+)
+def test_sandbox_policy_rejects_nonstandard_triggers(original, replacement):
+    workflow = _workflow("sandbox.yml")
+    mutated = workflow.replace(original, replacement, 1)
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
+        _assert_sandbox_workflow_is_hardened(mutated)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "    continue-on-error: true\n",
+        "    defaults:\n      run:\n        shell: bash\n",
+        "    container: python:3.11-slim\n",
+        "    env:\n      MCA_SANDBOX_BACKEND: none\n",
+        "    strategy:\n      fail-fast: false\n",
+    ],
+)
+def test_sandbox_policy_rejects_job_execution_overrides(override):
+    workflow = _workflow("sandbox.yml")
+    mutated = workflow.replace("  docker:\n", f"  docker:\n{override}", 1)
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
+        _assert_sandbox_workflow_is_hardened(mutated)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "        continue-on-error: true\n",
+        "        shell: bash {0} || true\n",
+        "        env:\n          MCA_SANDBOX_BACKEND: none\n",
+        "        working-directory: /tmp\n",
+    ],
+)
+def test_sandbox_policy_rejects_critical_run_step_overrides(override):
+    workflow = _workflow("sandbox.yml")
+    command = "mca sandbox probe --sandbox docker"
+    mutated = workflow.replace(
+        f"      - run: {command}\n",
+        f"      - run: {command}\n{override}",
+        1,
+    )
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
+        _assert_sandbox_workflow_is_hardened(mutated)
+
+
+def test_sandbox_policy_rejects_disabled_setup_python_action():
+    workflow = _workflow("sandbox.yml")
+    setup_python = f"actions/setup-python@{APPROVED_ACTIONS['actions/setup-python']}"
+    mutated = workflow.replace(
+        f"      - uses: {setup_python}",
+        f"      - uses: {setup_python}\n        if: false",
+        1,
+    )
+    assert mutated != workflow
+
+    with pytest.raises(AssertionError):
+        _assert_sandbox_workflow_is_hardened(mutated)
 
 
 def test_dependabot_groups_weekly_pip_and_actions_updates():

@@ -309,6 +309,10 @@ class ConversationalCodeAgent:
         }
         if result.tests_run is not None:
             event["tests_run"] = result.tests_run
+        if result.verification_checks:
+            event["verification_checks"] = [
+                item.to_dict() for item in result.verification_checks
+            ]
         return self.executor.redactor.redact_data(event)
 
     def _artifact_paths(self) -> set[Path]:

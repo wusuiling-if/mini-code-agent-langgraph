@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from mini_code_agent import __version__
+from mini_code_agent.checks import (
+    VerificationCheck,
+    normalize_verification_checks,
+)
+from mini_code_agent.utils import command_from_argv
 
 
 # These nullable seams keep CLI imports lightweight while preserving the
@@ -90,8 +95,8 @@ class ChatAccessController:
             return _load_tool_result()(
                 tool=name,
                 output=(
-                    f"{name} requires an authoritative test command. Restart with "
-                    "--test-command '<command>'."
+                    f"{name} requires an authoritative verification check. Restart with "
+                    "--test-command '<command>' or --check NAME '<command>'."
                 ),
                 returncode=-1,
                 duration_ms=0,
@@ -145,6 +150,24 @@ def _non_empty_command(value: str) -> str:
     if not command:
         raise argparse.ArgumentTypeError("must not be blank")
     return command
+
+
+def _configured_verification_checks(
+    args: argparse.Namespace, *, required: bool
+) -> tuple[tuple[VerificationCheck, ...], tuple[VerificationCheck, ...]]:
+    explicit = tuple(
+        VerificationCheck(name, command)
+        for name, command in (getattr(args, "checks", None) or ())
+    )
+    combined = normalize_verification_checks(
+        getattr(args, "test_command", None), explicit
+    )
+    if required and not combined:
+        raise RuntimeError(
+            "configure --test-command '<command>' or at least one "
+            "--check NAME '<command>'"
+        )
+    return combined, explicit
 
 
 def _state_root() -> Path:
@@ -261,6 +284,39 @@ def _model_from_args(args: argparse.Namespace):
     )
 
 
+def _add_transaction_runtime_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--model", required=True, help="Model name.")
+    parser.add_argument("--provider", choices=["auto", "deepseek", "openai"], default="auto")
+    parser.add_argument("--base-url", default=None, help="Provider API base URL.")
+    parser.add_argument("--env-file", type=Path, default=None)
+    parser.add_argument("--max-steps", type=_positive_int, default=50)
+    parser.add_argument("--context-chars", type=_positive_int, default=60_000)
+    parser.add_argument("--timeout", type=_positive_int, default=30)
+    parser.add_argument("--request-timeout", type=_positive_float, default=60.0)
+    parser.add_argument("--max-retries", type=_non_negative_int, default=2)
+    parser.add_argument("--deepseek-thinking", action="store_true")
+    parser.add_argument("--test-command", type=_non_empty_command, default=None)
+    parser.add_argument(
+        "--check",
+        dest="checks",
+        action="append",
+        nargs=2,
+        metavar=("NAME", "COMMAND"),
+        default=None,
+    )
+    parser.add_argument("--allow-zero-tests", action="store_true")
+    parser.add_argument("--allow-shell", action="store_true")
+    parser.add_argument(
+        "--sandbox",
+        choices=["auto", "sandbox-exec", "bwrap", "docker", "none"],
+        default="auto",
+    )
+    parser.add_argument("--docker-image", default=None)
+    parser.add_argument("--yolo", action="store_true")
+    parser.add_argument("--yes", action="store_true", help="Alias for --yolo.")
+    parser.add_argument("--quiet", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mca", description="Mini LangGraph coding agent.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -297,8 +353,17 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--test-command",
         type=_non_empty_command,
-        required=True,
+        default=None,
         help="Default command for run_tests.",
+    )
+    run.add_argument(
+        "--check",
+        dest="checks",
+        action="append",
+        nargs=2,
+        metavar=("NAME", "COMMAND"),
+        default=None,
+        help="Add a named authoritative verification check; repeatable.",
     )
     run.add_argument(
         "--allow-zero-tests",
@@ -323,6 +388,37 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--yolo", action="store_true", help="Run commands without confirmation.")
     run.add_argument("--yes", action="store_true", help="Alias for --yolo.")
     run.add_argument("--quiet", action="store_true", help="Hide step output.")
+
+    transaction = subparsers.add_parser(
+        "tx", help="Run and commit coding work as a recoverable transaction."
+    )
+    transaction_commands = transaction.add_subparsers(
+        dest="transaction_command", required=True
+    )
+    transaction_run = transaction_commands.add_parser(
+        "run", help="Run an agent in a new isolated transaction."
+    )
+    transaction_run.add_argument("task", help="Task for the transactional run.")
+    transaction_run.add_argument(
+        "--cwd", default=None, help="Clean Git worktree root. Defaults to current directory."
+    )
+    _add_transaction_runtime_arguments(transaction_run)
+    transaction_resume = transaction_commands.add_parser(
+        "resume", help="Resume an interrupted open transaction."
+    )
+    transaction_resume.add_argument("transaction_id")
+    _add_transaction_runtime_arguments(transaction_resume)
+    for name, help_text in (
+        ("status", "Show durable transaction state."),
+        ("receipt", "Verify and show a prepared transaction receipt."),
+        ("commit", "Apply a prepared transaction to its source worktree."),
+        ("abort", "Discard an isolated transaction worktree."),
+    ):
+        command = transaction_commands.add_parser(name, help=help_text)
+        command.add_argument("transaction_id")
+    transaction_commands.add_parser(
+        "demo", help="Demonstrate successful commit and conflict refusal without an API key."
+    )
 
     chat = subparsers.add_parser("chat", help="Start a persistent chat-and-code session.")
     chat.add_argument("--cwd", default=None, help="Project directory. Defaults to current directory.")
@@ -356,6 +452,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=_non_empty_command,
         default=None,
         help="Configure authoritative test verification and enable /code mode.",
+    )
+    chat.add_argument(
+        "--check",
+        dest="checks",
+        action="append",
+        nargs=2,
+        metavar=("NAME", "COMMAND"),
+        default=None,
+        help="Add a named authoritative verification check; repeatable.",
     )
     chat.add_argument(
         "--allow-zero-tests",
@@ -405,6 +510,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run a deterministic no-key coding demo in a temporary workspace.",
     )
 
+    sandbox = subparsers.add_parser(
+        "sandbox", help="Inspect command isolation capabilities."
+    )
+    sandbox_commands = sandbox.add_subparsers(
+        dest="sandbox_command", required=True
+    )
+    probe = sandbox_commands.add_parser(
+        "probe", help="Run disposable isolation checks."
+    )
+    probe.add_argument(
+        "--sandbox",
+        choices=["auto", "sandbox-exec", "bwrap", "docker"],
+        default="auto",
+    )
+    probe.add_argument("--docker-image", default=None)
+    probe.add_argument("--timeout", type=_positive_int, default=10)
+
     doctor = subparsers.add_parser(
         "doctor",
         help="Inspect local prerequisites without reading secret values.",
@@ -432,6 +554,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_agent(args: argparse.Namespace) -> int:
+    _combined_checks, explicit_checks = _configured_verification_checks(
+        args, required=True
+    )
     if args.model == "mock":
         raise RuntimeError(
             "The scripted mock is not a general coding model; use `mca demo` for the no-key demo."
@@ -459,6 +584,7 @@ def run_agent(args: argparse.Namespace) -> int:
         approval_mode="yolo" if auto_approve else "confirm",
         allow_shell=args.allow_shell,
         default_test_command=args.test_command,
+        verification_checks=explicit_checks,
         allow_zero_tests=args.allow_zero_tests,
         sandbox_mode=args.sandbox,
         docker_image=args.docker_image
@@ -491,6 +617,10 @@ def run_agent(args: argparse.Namespace) -> int:
 
 
 def chat_command(args: argparse.Namespace) -> int:
+    combined_checks, explicit_checks = _configured_verification_checks(
+        args, required=False
+    )
+    coding_enabled = bool(combined_checks)
     from mini_code_agent.trajectory import load_trajectory
 
     if not sys.stdin.isatty():
@@ -512,16 +642,17 @@ def chat_command(args: argparse.Namespace) -> int:
         approval_mode="yolo" if args.yes else "confirm",
         allow_shell=args.allow_shell,
         default_test_command=args.test_command,
+        verification_checks=explicit_checks,
         allow_zero_tests=args.allow_zero_tests,
         sandbox_mode=args.sandbox,
         docker_image=args.docker_image
         or os.getenv("MCA_DOCKER_IMAGE", "python:3.11-slim"),
     )
     model = _model_from_args(args)
-    if args.test_command is not None:
+    if coding_enabled:
         _require_working_sandbox(executor)
     output = _resume_output_path(args.resume, args.output, "chat")
-    access = ChatAccessController(executor, coding_enabled=args.test_command is not None)
+    access = ChatAccessController(executor, coding_enabled=coding_enabled)
     session = _load_conversational_code_agent()(
         model,
         access,
@@ -555,11 +686,11 @@ def chat_command(args: argparse.Namespace) -> int:
                 continue
             command, separator, remainder = user_text.partition(" ")
             if command in {"/ask", "/code"}:
-                if command == "/code" and args.test_command is None:
+                if command == "/code" and not coding_enabled:
                     access.mode = "ask"
                     print(
                         "/code is unavailable: restart with --test-command '<command>' "
-                        "to enable coding. Staying in /ask mode."
+                        "or --check NAME '<command>' to enable coding. Staying in /ask mode."
                     )
                     continue
                 access.mode = command.removeprefix("/")
@@ -605,6 +736,24 @@ def main() -> None:
     try:
         if args.command == "run":
             raise SystemExit(run_agent(args))
+        if args.command == "tx" and args.transaction_command == "run":
+            from mini_code_agent.transaction_cli import agent_command
+
+            raise SystemExit(agent_command(args, resume=False))
+        if args.command == "tx" and args.transaction_command == "resume":
+            from mini_code_agent.transaction_cli import agent_command
+
+            raise SystemExit(agent_command(args, resume=True))
+        if args.command == "tx" and args.transaction_command == "demo":
+            from mini_code_agent.transaction_cli import (
+                demo_command as transaction_demo_command,
+            )
+
+            raise SystemExit(transaction_demo_command(args))
+        if args.command == "tx":
+            from mini_code_agent.transaction_cli import state_command
+
+            raise SystemExit(state_command(args))
         if args.command == "chat":
             raise SystemExit(chat_command(args))
         if args.command == "trace":
@@ -615,6 +764,8 @@ def main() -> None:
             raise SystemExit(init_command(args))
         if args.command == "demo":
             raise SystemExit(demo_command(args))
+        if args.command == "sandbox" and args.sandbox_command == "probe":
+            raise SystemExit(sandbox_probe_command(args))
         if args.command == "doctor":
             raise SystemExit(doctor_command(args))
         parser.print_help()
@@ -754,7 +905,7 @@ def _demo_forbidden_root() -> Path:
 
 
 def _platform_supports_demo() -> bool:
-    return os.name != "nt"
+    return True
 
 
 def demo_command(_args: argparse.Namespace) -> int:
@@ -766,7 +917,9 @@ def demo_command(_args: argparse.Namespace) -> int:
     root = _create_demo_workspace()
     _write_demo_fixture(root)
     trajectory_path = root.with_suffix(".traj.json")
-    test_command = f"{shlex.quote(sys.executable)} -m unittest discover -v"
+    test_command = command_from_argv(
+        [sys.executable, "-m", "unittest", "discover", "-v"]
+    )
     executor = _load_bash_executor()(
         root,
         approval_mode="yolo",
@@ -808,6 +961,21 @@ def doctor_command(args: argparse.Namespace) -> int:
         f"pass={counts['pass']} warn={counts['warn']} fail={counts['fail']}"
     )
     return 1 if counts["fail"] else 0
+
+
+def sandbox_probe_command(args: argparse.Namespace) -> int:
+    from mini_code_agent.sandbox_probe import run_sandbox_probe
+
+    report = run_sandbox_probe(
+        sandbox_mode=args.sandbox,
+        docker_image=args.docker_image
+        or os.getenv("MCA_DOCKER_IMAGE", "python:3.11-slim"),
+        timeout_seconds=args.timeout,
+    )
+    for check in report.checks:
+        status = "PASS" if check.passed else "FAIL"
+        print(f"[{status}] {check.name}: {check.detail}")
+    return 0 if report.ok else 1
 
 
 def _git_dirty(cwd: Path) -> bool:
