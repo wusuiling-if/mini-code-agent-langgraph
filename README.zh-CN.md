@@ -205,13 +205,24 @@ Demo 会证明成功场景在 commit 前没有修改源仓库；随后在第二�
 
 ## 配置密钥
 
-默认在用户配置目录创建私有 `0600` env 文件：
+像 pi-agent 一样，直接在终端登录即可。CLI 会隐藏密钥输入，并自动保存到用户配置目录的私有 `0600` 文件，无需手动打开配置文件：
 
 ```bash
-mca init
+mca login
+# 或直接指定 provider
+mca login deepseek
+mca login openai
 ```
 
-使用真实 provider 前，请先在生成的文件中填入 provider key。之后 `mca run` 和 `mca chat` 会自动加载这个默认文件；只有使用其他位置时才需要传 `--env-file`。
+`mca login` 会交互选择 provider。需要删除已保存的凭据时运行：
+
+```bash
+mca logout deepseek
+```
+
+交互式启动 `mca run`、`mca chat` 或 `mca tx run` 时，如果所选 provider 还没有凭据，CLI 也会就地提示登录。之后的运行会自动加载已保存凭据。
+
+环境变量和自定义 `--env-file` 仍然受支持，适合 CI 和脚本。`mca init` 仅用于需要手动维护完整 env 配置的高级场景。
 
 默认路径：
 
@@ -221,7 +232,7 @@ mca init
 | Linux | `${XDG_CONFIG_HOME:-~/.config}/mini-code-agent/env` |
 | Windows | `%APPDATA%\mini-code-agent\env` |
 
-也可指定项目外的路径：
+高级用法中也可创建项目外的 env 模板：
 
 ```bash
 mca init --path ~/.config/mca.env

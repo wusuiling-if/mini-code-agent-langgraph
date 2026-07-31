@@ -4,12 +4,15 @@ The package retains the `mca` CLI and the `mini-code-agent-langgraph` PyPI name.
 
 ## Configure a provider
 
-Create a private environment-file template, populate it with a provider key, and inspect prerequisites without exposing secret values:
+Sign in from the terminal. The key prompt is hidden and the credential is stored in a private per-user file, so no config file needs to be opened manually:
 
 ```bash
-mca init
+mca login deepseek
+# or: mca login openai
 mca doctor --cwd /path/to/repo --sandbox auto --provider auto
 ```
+
+Run `mca logout deepseek` (or `openai`) to remove a saved credential. Interactive agent startup also offers this login flow when the selected provider has no credential. Environment variables, `--env-file`, and the advanced `mca init` env-template workflow remain available for automation and custom endpoints.
 
 ## One-shot and chat integrations
 

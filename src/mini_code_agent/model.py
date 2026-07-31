@@ -283,7 +283,8 @@ def create_model(
         resolved_api_key = api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("MCA_API_KEY")
         if not resolved_api_key:
             raise RuntimeError(
-                "DeepSeek API key is missing. Set DEEPSEEK_API_KEY, MCA_API_KEY, or use --env-file."
+                "DeepSeek API key is missing. Run `mca login deepseek`, set "
+                "DEEPSEEK_API_KEY/MCA_API_KEY, or use --env-file."
             )
         model_options: dict[str, Any] = {
             "model": resolved_model,
@@ -305,7 +306,8 @@ def create_model(
     resolved_api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("MCA_API_KEY")
     if not resolved_api_key:
         raise RuntimeError(
-            "OpenAI API key is missing. Set OPENAI_API_KEY, MCA_API_KEY, or use --env-file. "
+            "OpenAI API key is missing. Run `mca login openai`, set "
+            "OPENAI_API_KEY/MCA_API_KEY, or use --env-file. "
             "For a keyless local compatible server, set MCA_API_KEY=not-needed explicitly."
         )
     from langchain_openai import ChatOpenAI

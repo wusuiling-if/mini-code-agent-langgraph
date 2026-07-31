@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import math
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -32,6 +34,14 @@ create_model = None
 
 
 READ_ONLY_CHAT_TOOLS = {"list_files", "search_files", "read_file", "git_diff"}
+PROVIDER_KEY_NAMES = {
+    "deepseek": "DEEPSEEK_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+PROVIDER_LABELS = {
+    "deepseek": "DeepSeek",
+    "openai": "OpenAI",
+}
 
 
 def _load_mini_code_agent():
@@ -273,11 +283,151 @@ def _load_runtime_env(explicit: Path | None) -> Path | None:
     return candidate
 
 
+def _read_secure_config(path: Path) -> str:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"env file does not exist: {path}") from exc
+    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(f"env file must be a regular, non-symlink file: {path}")
+    if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+        raise PermissionError(f"env file is not owned by this user: {path}")
+    if os.name != "nt" and stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise RuntimeError(
+            f"env file permissions are too broad: {path}; run chmod 600 {path}"
+        )
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError(f"env file must be a regular file: {path}")
+        if hasattr(os, "getuid") and opened.st_uid != os.getuid():
+            raise PermissionError(f"env file is not owned by this user: {path}")
+        if os.name != "nt" and stat.S_IMODE(opened.st_mode) & 0o077:
+            raise RuntimeError(
+                f"env file permissions are too broad: {path}; run chmod 600 {path}"
+            )
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            return handle.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _resolved_provider(provider: str, model: str) -> str:
+    if provider != "auto":
+        return provider
+    return (
+        "deepseek"
+        if model == "deepseek" or model.startswith("deepseek-")
+        else "openai"
+    )
+
+
+def _credential_is_configured(provider: str) -> bool:
+    return bool(os.getenv(PROVIDER_KEY_NAMES[provider]) or os.getenv("MCA_API_KEY"))
+
+
+def _write_config_value(name: str, value: str | None) -> Path:
+    if value is not None and (not value.strip() or "\n" in value or "\r" in value):
+        raise ValueError("API key must be a non-empty single-line value")
+
+    directory = _ensure_private_directory(_config_root())
+    path = directory / "env"
+    existing = ""
+    if path.exists():
+        existing = _read_secure_config(path)
+
+    pattern = re.compile(rf"^\s*#?\s*{re.escape(name)}\s*=.*$")
+    replacement = f"{name}={value}" if value is not None else f"# {name}="
+    lines = existing.splitlines(keepends=True)
+    matching_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if pattern.fullmatch(line.rstrip("\r\n"))
+    ]
+    if matching_indexes:
+        first = matching_indexes[0]
+        newline = "\r\n" if lines[first].endswith("\r\n") else "\n"
+        lines[first] = replacement + newline
+        for index in reversed(matching_indexes[1:]):
+            del lines[index]
+        content = "".join(lines)
+    else:
+        separator = "" if not existing or existing.endswith("\n") else "\n"
+        content = f"{existing}{separator}{replacement}\n"
+
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".env-", dir=directory)
+    temporary = Path(temporary_name)
+    try:
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        if os.name != "nt":
+            path.chmod(0o600)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return path
+
+
+def _select_provider() -> str:
+    if not sys.stdin.isatty():
+        raise RuntimeError("provider is required outside an interactive terminal")
+    print("Select a provider:")
+    print("  1. DeepSeek")
+    print("  2. OpenAI / OpenAI-compatible")
+    choice = input("Provider [1/2]: ").strip().lower()
+    providers = {
+        "1": "deepseek",
+        "2": "openai",
+        "deepseek": "deepseek",
+        "openai": "openai",
+    }
+    try:
+        return providers[choice]
+    except KeyError as exc:
+        raise RuntimeError("provider must be 1 (DeepSeek) or 2 (OpenAI)") from exc
+
+
+def _prompt_and_store_credential(provider: str) -> tuple[Path, str]:
+    if not sys.stdin.isatty():
+        raise RuntimeError("login needs an interactive terminal")
+    key = getpass.getpass(f"{PROVIDER_LABELS[provider]} API key: ")
+    path = _write_config_value(PROVIDER_KEY_NAMES[provider], key)
+    return path, key
+
+
 def _model_from_args(args: argparse.Namespace):
+    provider = _resolved_provider(args.provider, args.model)
+    prompted_key = None
+    if (
+        not _credential_is_configured(provider)
+        and args.env_file is None
+        and sys.stdin.isatty()
+    ):
+        print(f"No {PROVIDER_LABELS[provider]} credential found. Sign in to continue.")
+        path, prompted_key = _prompt_and_store_credential(provider)
+        print(f"Credential saved securely to {path}")
     return _load_create_model()(
         args.model,
         provider=args.provider,
         base_url=args.base_url,
+        api_key=prompted_key,
         request_timeout=args.request_timeout,
         max_retries=args.max_retries,
         deepseek_thinking=args.deepseek_thinking,
@@ -504,6 +654,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Env file path. Defaults to the per-user config directory.",
     )
+
+    login = subparsers.add_parser("login", help="Save a provider API key from the terminal.")
+    login.add_argument("provider", nargs="?", choices=["deepseek", "openai"])
+
+    logout = subparsers.add_parser("logout", help="Remove a saved provider API key.")
+    logout.add_argument("provider", nargs="?", choices=["deepseek", "openai"])
 
     subparsers.add_parser(
         "demo",
@@ -762,6 +918,10 @@ def main() -> None:
             raise SystemExit(undo_command(args))
         if args.command == "init":
             raise SystemExit(init_command(args))
+        if args.command == "login":
+            raise SystemExit(login_command(args))
+        if args.command == "logout":
+            raise SystemExit(logout_command(args))
         if args.command == "demo":
             raise SystemExit(demo_command(args))
         if args.command == "sandbox" and args.sandbox_command == "probe":
@@ -832,6 +992,24 @@ def init_command(args: argparse.Namespace) -> int:
     if os.name != "nt":
         path.chmod(0o600)
     print(f"created {path}")
+    return 0
+
+
+def login_command(args: argparse.Namespace) -> int:
+    provider = args.provider or _select_provider()
+    path, _key = _prompt_and_store_credential(provider)
+    print(f"Saved {PROVIDER_LABELS[provider]} credentials to {path}")
+    return 0
+
+
+def logout_command(args: argparse.Namespace) -> int:
+    provider = args.provider or _select_provider()
+    configured_path = _config_root() / "env"
+    if not configured_path.exists():
+        print(f"No saved {PROVIDER_LABELS[provider]} credentials found")
+        return 0
+    path = _write_config_value(PROVIDER_KEY_NAMES[provider], None)
+    print(f"Removed {PROVIDER_LABELS[provider]} credentials from {path}")
     return 0
 
 

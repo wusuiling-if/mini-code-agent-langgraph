@@ -16,6 +16,8 @@ HEAVY_MODULES = {
     "langchain_openai",
     "langgraph",
 }
+DEEPSEEK_KEY_NAME = "DEEPSEEK" + "_API_KEY"
+OPENAI_KEY_NAME = "OPENAI" + "_API_KEY"
 
 
 def _imported_top_level_modules(code: str) -> set[str]:
@@ -99,6 +101,132 @@ def test_parser_accepts_transaction_demo():
 
     assert args.command == "tx"
     assert args.transaction_command == "demo"
+
+
+def test_parser_accepts_login_and_logout_with_optional_provider():
+    parser = cli_module.build_parser()
+
+    assert parser.parse_args(["login", "deepseek"]).provider == "deepseek"
+    assert parser.parse_args(["logout", "openai"]).provider == "openai"
+    assert parser.parse_args(["login"]).provider is None
+
+
+def test_login_prompts_without_echo_and_saves_private_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    class TtyInput:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    config = tmp_path / "config"
+    secret = "test-secret-value"
+    monkeypatch.setenv("MCA_CONFIG_DIR", str(config))
+    monkeypatch.setattr(cli_module.sys, "stdin", TtyInput())
+    monkeypatch.setattr(cli_module.getpass, "getpass", lambda _prompt: secret)
+
+    result = cli_module.login_command(
+        cli_module.build_parser().parse_args(["login", "deepseek"])
+    )
+
+    env_file = config / "env"
+    assert result == 0
+    assert env_file.read_text(encoding="utf-8") == f"{DEEPSEEK_KEY_NAME}={secret}\n"
+    if os.name != "nt":
+        assert env_file.stat().st_mode & 0o777 == 0o600
+    assert secret not in capsys.readouterr().out
+
+
+def test_login_without_provider_selects_one_in_the_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    class TtyInput:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    monkeypatch.setenv("MCA_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setattr(cli_module.sys, "stdin", TtyInput())
+    monkeypatch.setattr("builtins.input", lambda _prompt: "2")
+    monkeypatch.setattr(cli_module.getpass, "getpass", lambda _prompt: "openai-secret")
+
+    result = cli_module.login_command(cli_module.build_parser().parse_args(["login"]))
+
+    assert result == 0
+    content = (tmp_path / "config" / "env").read_text(encoding="utf-8")
+    assert "OPENAI_API_KEY" in content
+
+
+def test_logout_without_saved_credentials_does_not_create_a_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    config = tmp_path / "config"
+    monkeypatch.setenv("MCA_CONFIG_DIR", str(config))
+
+    result = cli_module.logout_command(
+        cli_module.build_parser().parse_args(["logout", "openai"])
+    )
+
+    assert result == 0
+    assert not config.exists()
+
+
+def test_login_updates_existing_provider_and_logout_removes_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    config = tmp_path / "config"
+    config.mkdir()
+    env_file = config / "env"
+    env_file.write_text(
+        f"{DEEPSEEK_KEY_NAME}=old-secret\n"
+        f"{DEEPSEEK_KEY_NAME}=duplicate-secret\n"
+        f"# {OPENAI_KEY_NAME}=\nMCA_BASE_URL=http://localhost/v1\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    monkeypatch.setenv("MCA_CONFIG_DIR", str(config))
+
+    cli_module._write_config_value("DEEPSEEK_API_KEY", "new-secret")
+    cli_module._write_config_value("DEEPSEEK_API_KEY", None)
+
+    content = env_file.read_text(encoding="utf-8")
+    assert "old-secret" not in content
+    assert "duplicate-secret" not in content
+    assert "new-secret" not in content
+    assert content.count(DEEPSEEK_KEY_NAME) == 1
+    assert f"# {DEEPSEEK_KEY_NAME}=" in content
+    assert "MCA_BASE_URL=http://localhost/v1" in content
+
+
+def test_model_startup_prompts_for_missing_provider_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    class TtyInput:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    captured: dict[str, object] = {}
+
+    def fake_create_model(model: str, **kwargs):
+        captured.update(model=model, **kwargs)
+        return object()
+
+    monkeypatch.setenv("MCA_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("MCA_API_KEY", raising=False)
+    monkeypatch.setattr(cli_module.sys, "stdin", TtyInput())
+    monkeypatch.setattr(cli_module.getpass, "getpass", lambda _prompt: "entered-key")
+    monkeypatch.setattr(cli_module, "_load_create_model", lambda: fake_create_model)
+    args = cli_module.build_parser().parse_args(["chat", "--model", "deepseek"])
+
+    cli_module._model_from_args(args)
+
+    assert captured["api_key"] == "entered-key"
+    assert os.getenv("DEEPSEEK_API_KEY") is None
+    assert (tmp_path / "config" / "env").exists()
 
 
 def test_transaction_demo_proves_commit_and_conflict_paths(
