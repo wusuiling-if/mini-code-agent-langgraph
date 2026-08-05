@@ -741,7 +741,7 @@ def test_dependabot_groups_weekly_pip_and_actions_updates():
 
 def test_supply_chain_runs_strict_audit_and_pr_only_dependency_review():
     assert _required_file("requirements-ci.txt").read_text(encoding="utf-8").splitlines() == [
-        "pip==26.1.2",
+        "pip==26.2",
         "setuptools==83.0.0",
         "pip-audit==2.10.1",
     ]
