@@ -1,12 +1,13 @@
 {
   "schema_version": 1,
-  "status": "smoke-validated-pilot-pending",
+  "status": "three-task-smoke-complete-pilot-blocked",
   "harness": {
     "name": "harbor",
     "version": "0.22.0",
     "environment": "docker",
     "docker_platform": "linux/amd64",
     "agent_env": {
+      "BASH_ENV": "/root/.local/bin/env",
       "UV_CONCURRENT_DOWNLOADS": "1",
       "UV_HTTP_TIMEOUT": "120"
     },
