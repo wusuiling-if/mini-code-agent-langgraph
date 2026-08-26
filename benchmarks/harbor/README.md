@@ -40,6 +40,22 @@ the private task prompt, so do not publish it without reviewing/redacting it.
 
 Harbor 0.22 requires Python 3.12+. Docker execution is best run on an x86-64 host or
 cloud sandbox because SWE-bench images are not a reliable local ARM/macOS workload.
+The launcher accepts either bare task names or `swe-bench/...` references and emits
+the fully-qualified filter required by Harbor 0.22. It also locates `harbor` beside
+the active Python executable, so calling `.harbor-venv/bin/python` directly works
+without separately activating the virtual environment, and makes the repository's
+candidate adapter importable by the Harbor subprocess.
+The candidate installer first reuses the task image's pinned `uv==0.7.13`; its
+network installer is only a fallback, which avoids an unnecessary mutable download.
+Fetching the exact candidate package may retry up to three times to tolerate transport
+failures; each attempt uses the same immutable package specification.
+The candidate permits up to three explicit transaction resumes after an interrupted open
+checkpoint, with 10/20/30-second backoff. Request retries remain disabled; the resumed
+transaction retains cumulative steps and token usage and must run fresh verification
+before it can commit.
+The protocol also pins Docker execution to `linux/amd64` and lowers `uv` download
+concurrency for both agent setup and verifier parsing. These transport settings are
+recorded in each Harbor lock and do not change the selected packages or test logic.
 
 ```bash
 python3.12 -m venv .harbor-venv

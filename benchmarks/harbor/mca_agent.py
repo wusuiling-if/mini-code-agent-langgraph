@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import shlex
 from pathlib import Path
 from typing import Any
 
 from benchmarks.harbor.protocol import (
     HarborRunConfig,
+    build_agent_install_command,
     build_transaction_command,
     load_latest_run,
     split_harbor_model,
@@ -36,6 +36,8 @@ class MiniCodeAgentHarborAdapter(BaseInstalledAgent):
         command_timeout: int = 120,
         request_timeout: int = 180,
         max_retries: int = 0,
+        resume_attempts: int = 3,
+        resume_backoff_seconds: int = 10,
         allow_shell: bool = False,
         *args: Any,
         **kwargs: Any,
@@ -44,12 +46,15 @@ class MiniCodeAgentHarborAdapter(BaseInstalledAgent):
         if not isinstance(package_spec, str) or not package_spec.strip():
             raise ValueError("package_spec must not be blank")
         self._package_spec = package_spec
+        self._run_metadata: dict[str, Any] = {}
         self._run_config = HarborRunConfig(
             max_steps=max_steps,
             context_chars=context_chars,
             command_timeout=command_timeout,
             request_timeout=request_timeout,
             max_retries=max_retries,
+            resume_attempts=resume_attempts,
+            resume_backoff_seconds=resume_backoff_seconds,
             allow_shell=allow_shell,
         )
 
@@ -68,18 +73,9 @@ class MiniCodeAgentHarborAdapter(BaseInstalledAgent):
             environment,
             ("curl", "bash", "git", "python3"),
         )
-        package_spec = shlex.quote(self._package_spec)
         await self.exec_as_agent(
             environment,
-            command=(
-                "set -euo pipefail; "
-                "if ! command -v uv >/dev/null 2>&1; then "
-                "curl -LsSf https://astral.sh/uv/install.sh | sh; fi; "
-                'if [ -f "$HOME/.local/bin/env" ]; then . "$HOME/.local/bin/env"; '
-                'else export PATH="$HOME/.local/bin:$PATH"; fi; '
-                f"uv tool install --python 3.11 {package_spec}; "
-                "mca --version"
-            ),
+            command=build_agent_install_command(self._package_spec),
         )
 
     @with_prompt_template
@@ -104,8 +100,7 @@ class MiniCodeAgentHarborAdapter(BaseInstalledAgent):
             base_url=access.configured_base_url,
             config=self._run_config,
         )
-        context.metadata = {
-            **(context.metadata or {}),
+        self._run_metadata = {
             "mca": {
                 "provider": provider,
                 "memory": "off",
@@ -114,11 +109,12 @@ class MiniCodeAgentHarborAdapter(BaseInstalledAgent):
                 "outer_sandbox": "harbor_environment",
                 "agent_visible_check": self._run_config.check_command,
                 "hidden_verifier_exposed": False,
-            },
+            }
         }
         await self.exec_as_agent(environment, command=command, env=env)
 
     def populate_context_post_run(self, context: AgentContext) -> None:
+        context.metadata = {**(context.metadata or {}), **self._run_metadata}
         try:
             trajectory, manifest = load_latest_run(Path(self.logs_dir))
         except (FileNotFoundError, OSError, UnicodeError, ValueError):

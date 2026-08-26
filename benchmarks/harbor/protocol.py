@@ -7,6 +7,32 @@ from pathlib import Path
 from typing import Any
 
 SUPPORTED_PROVIDERS = frozenset({"deepseek", "openai"})
+UV_VERSION = "0.7.13"
+UV_TOOL_INSTALL_ATTEMPTS = 3
+
+
+def build_agent_install_command(package_spec: str) -> str:
+    """Install MCA while reusing the task image's pinned uv when available."""
+
+    package = shlex.quote(package_spec)
+    load_uv = (
+        'if [ -f "$HOME/.local/bin/env" ]; then . "$HOME/.local/bin/env"; '
+        'else export PATH="$HOME/.local/bin:$PATH"; fi'
+    )
+    return (
+        "set -euo pipefail; "
+        f"{load_uv}; "
+        "if ! command -v uv >/dev/null 2>&1; then "
+        f"curl -LsSf https://astral.sh/uv/{UV_VERSION}/install.sh | sh; "
+        f"{load_uv}; "
+        "fi; "
+        "install_status=1; "
+        f"for install_attempt in $(seq 1 {UV_TOOL_INSTALL_ATTEMPTS}); do "
+        f"if uv tool install --python 3.11 {package}; then "
+        "install_status=0; break; fi; done; "
+        'test "$install_status" -eq 0; '
+        "mca --version"
+    )
 
 
 def split_harbor_model(model_name: str) -> tuple[str, str]:
@@ -30,6 +56,8 @@ class HarborRunConfig:
     command_timeout: int = 120
     request_timeout: int = 180
     max_retries: int = 0
+    resume_attempts: int = 3
+    resume_backoff_seconds: int = 10
     allow_shell: bool = False
     check_name: str = "patch-integrity"
     check_command: str = "git diff --check"
@@ -46,12 +74,10 @@ class HarborRunConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        if (
-            isinstance(self.max_retries, bool)
-            or not isinstance(self.max_retries, int)
-            or self.max_retries < 0
-        ):
-            raise ValueError("max_retries must be a non-negative integer")
+        for name in ("max_retries", "resume_attempts", "resume_backoff_seconds"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
         if not self.check_name.strip() or not self.check_command.strip():
             raise ValueError("benchmark check name and command must not be blank")
         for name in ("state_dir", "log_path"):
@@ -107,15 +133,66 @@ def build_transaction_command(
     if config.allow_shell:
         argv.append("--allow-shell")
     run_command = shlex.join(argv)
+    resume_argv = [
+        "mca",
+        "tx",
+        "resume",
+        "MCA_TRANSACTION_ID_PLACEHOLDER",
+        "--model",
+        model,
+        "--provider",
+        provider,
+        "--memory",
+        "off",
+        "--max-steps",
+        str(config.max_steps),
+        "--context-chars",
+        str(config.context_chars),
+        "--timeout",
+        str(config.command_timeout),
+        "--request-timeout",
+        str(config.request_timeout),
+        "--max-retries",
+        str(config.max_retries),
+        "--check",
+        config.check_name,
+        config.check_command,
+        "--sandbox",
+        "none",
+        "--yes",
+        "--quiet",
+    ]
+    if base_url:
+        resume_argv.extend(("--base-url", base_url))
+    if config.allow_shell:
+        resume_argv.append("--allow-shell")
+    resume_command = shlex.join(resume_argv).replace(
+        "MCA_TRANSACTION_ID_PLACEHOLDER", '"$transaction_id"'
+    )
     state_dir = shlex.quote(config.state_dir)
     log_path = shlex.quote(config.log_path)
     return (
         "set -euo pipefail\n"
+        'if [ -f "$HOME/.local/bin/env" ]; then . "$HOME/.local/bin/env"; '
+        'else export PATH="$HOME/.local/bin:$PATH"; fi\n'
         f"export MCA_STATE_DIR={state_dir}\n"
+        "set +e\n"
         f"{run_command} 2>&1 | tee {log_path}\n"
+        "run_status=${PIPESTATUS[0]}\n"
+        "set -e\n"
         "transaction_id=$(sed -n 's/^transaction: //p' "
         f"{log_path} | tail -n 1)\n"
         'test -n "$transaction_id"\n'
+        "resume_count=0\n"
+        f'while [ "$run_status" -ne 0 ] && [ "$resume_count" -lt {config.resume_attempts} ]; do\n'
+        "  resume_count=$((resume_count + 1))\n"
+        f'  sleep "$((resume_count * {config.resume_backoff_seconds}))"\n'
+        "  set +e\n"
+        f"  {resume_command} 2>&1 | tee -a {log_path}\n"
+        "  run_status=${PIPESTATUS[0]}\n"
+        "  set -e\n"
+        "done\n"
+        'test "$run_status" -eq 0\n'
         f'mca tx commit "$transaction_id" 2>&1 | tee -a {log_path}\n'
     )
 
