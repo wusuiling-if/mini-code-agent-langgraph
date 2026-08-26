@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessage
 
 from mini_code_agent.agent import MiniCodeAgent
 from mini_code_agent.chat import ConversationalCodeAgent
-from mini_code_agent.checks import VerificationCheck
+from mini_code_agent.checks import VerificationCheck, verification_command_sha256
 from mini_code_agent.executor import BashExecutor
 from mini_code_agent.model import create_model
 from mini_code_agent.trajectory import load_trajectory, summarize_trajectory, undo_trajectory
@@ -313,6 +313,10 @@ def test_agent_persists_redacted_matrix_evidence_and_submits(tmp_path: Path):
         "tests",
         "lint",
     ]
+    assert [item["command_sha256"] for item in event["verification_checks"]] == [
+        verification_command_sha256(tests_command),
+        verification_command_sha256(lint_command),
+    ]
     persisted = json.loads(trajectory_path.read_text(encoding="utf-8"))
     redaction_args = {
         "commands": (tests_command, lint_command),
@@ -359,6 +363,10 @@ def test_chat_event_contains_only_redacted_matrix_evidence(tmp_path: Path):
     assert [item["name"] for item in event["verification_checks"]] == [
         "tests",
         "lint",
+    ]
+    assert [item["command_sha256"] for item in event["verification_checks"]] == [
+        verification_command_sha256(tests_command),
+        verification_command_sha256(lint_command),
     ]
     persisted = json.loads(trajectory_path.read_text(encoding="utf-8"))
     redaction_args = {

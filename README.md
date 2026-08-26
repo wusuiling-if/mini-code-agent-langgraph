@@ -44,6 +44,7 @@ The demo runs two deterministic transactions. The first proves that a verified p
 mca tx run "Fix the failing tests" \
   --cwd /path/to/clean/git/repo \
   --model deepseek \
+  --memory local \
   --check tests "pytest -q"
 
 mca tx status TRANSACTION_ID
@@ -58,6 +59,75 @@ See [the transaction protocol](docs/transaction-protocol.md) for lifecycle, rece
 The package still includes one-shot `mca run`, persistent `mca chat`, DeepSeek and OpenAI-compatible providers, trace inspection, and conflict-aware undo. These are integrations around the transaction core rather than the primary product identity.
 
 See [runtime operations](docs/runtime-operations.md) for provider setup, verification matrices, chat modes, trajectory handling, and the legacy deterministic demo.
+
+## Opt-in memory foundation
+
+The project includes an evidence-bound local memory foundation:
+immutable cards, append-only temporal status, authenticated
+evidence/edges, SQLite FTS retrieval, and a read-only `mca memory` CLI. It is not
+connected to `run`, `chat`, or `tx` by default, so existing behavior and required
+dependencies remain unchanged. Transaction runs can explicitly select `--memory local`;
+the original evidence-temporal retriever then injects only same-workspace advisory context.
+After a successful commit, the runtime records both the authenticated verification workflow
+and a receipt-bound verified repair patch, without storing verification command plaintext.
+The outcome controller remains research-only after regressing in natural transfer tests. See [evidence-bound local memory](docs/memory.md)
+for the trust model, commands, and current boundary.
+
+The host-neutral `memory_core` package has no dependency on the MCA transaction or
+agent runtime. MCA-specific receipt, stable Git identity, and context-injection code lives
+behind adapters. Context rendering has a 16K hard budget, structured retrieval audits omit
+memory content, and per-project repair capacity retires old records without deleting audit
+history. Private resumable trajectories still contain the bounded injected context. Retrieval
+narrows candidates to the requested scopes plus global records before authenticating cards and
+their latest state, so unrelated project history no longer participates in ranking.
+
+The portable conversation layer also includes replayable semantic mutations, canonical
+checkpoints, post-condition commit reports, a loss-aware SillyTavern chat adapter, and a
+non-executing Tavern Helper import preview. JavaScript and remote module loaders stay
+quarantined; declarative variables become untrusted schema-mapping candidates rather than
+durable facts. Core identity and preference memories are protected from capacity eviction,
+while episodic/transient noise remains compressible or retireable. New sessions reserve a
+bounded continuity context and report core overflow instead of silently omitting it. See
+[portable conversation memory](docs/conversation-memory.md).
+
+An optional OpenAI-compatible embedding backend can point to either a hosted API or a
+local/private model server, so local model deployment is not required. It is off by default,
+caches derived vectors privately, sees only hard-filtered candidates, and falls back to the
+original lexical/graph retriever when unavailable.
+
+In a no-embedding 120-session dialogue diagnostic, retrieval after explicit authenticated
+session ingestion reached 10/10. DeepSeek reading scored 30% from the recent window and 90%
+from both full history and evidence-temporal memory, while the memory path averaged 342 context
+characters. This does not test automatic conversation extraction, which production `mca chat`
+does not yet implement.
+
+The deterministic cross-domain ablation compares no memory, pure top-k recall,
+a traditional three-layer baseline, and the evidence-temporal hybrid:
+
+```bash
+.venv/bin/python -m evals.run_memory_comparison
+```
+
+The v0.5.0 release gate runs all eight deterministic memory suites without a
+model call and emits one source-bound JSON report:
+
+```bash
+.venv/bin/python -m evals.run_memory_suite --json \
+  --output /tmp/memory-v0.5.0.json
+```
+
+Outcome-aware control, automatic free-conversation extraction, and chat-format
+imports remain experiments. See [project scope](docs/project-scope.md) for the
+production and evaluation boundary.
+
+## Public fixed-model harness comparison
+
+The v0.5.0 candidate includes a Harbor 0.22 adapter and a pinned 25-task pilot from
+the public SWE-bench Verified dataset. It compares MCA with `mini-swe-agent==2.1.0`
+under the pinned `openai/gpt-5.6-sol` model and provider endpoint. The launcher is
+dry-run by default and supports a paired one-task `--smoke`; no score is claimed
+until both paid arms have run and their resolved task/image locks match. See
+[the Harbor protocol](benchmarks/harbor/README.md).
 
 ## Enforced controls and limits
 
@@ -94,11 +164,14 @@ src/mini_code_agent/transaction.py   Framework-independent transaction state mac
 src/mini_code_agent/transaction_adapter.py Agent tool-call and access-set adapter
 src/mini_code_agent/transaction_cli.py Transaction command orchestration and demo
 src/mini_code_agent/receipt.py       Authenticated prepared-patch receipts
+src/mini_code_agent/memory_models.py Immutable memory values and authority policy
+src/mini_code_agent/memory_store.py  Authenticated SQLite/FTS memory foundation
 src/mini_code_agent/locking.py       POSIX/Windows transaction file locks
 src/mini_code_agent/security.py      Path and secret protections
 src/mini_code_agent/cli.py           CLI and state/configuration handling
 tests/                               Deterministic test suite
 evals/                               Offline evaluation baseline
+benchmarks/harbor/                   Fixed-model SWE-bench harness comparison
 ```
 
 ## Develop and validate a checkout
@@ -109,6 +182,7 @@ Cloning the repository and using an editable install are contributor workflows; 
 pytest -q
 python -m pip check
 python -m evals.run_evals --json
+python -m evals.run_memory_suite --json
 mca doctor --sandbox none
 mca demo
 ```

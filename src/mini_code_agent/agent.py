@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import operator
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict
 
@@ -66,7 +67,63 @@ class AgentState(TypedDict):
     events: Annotated[list[dict[str, Any]], operator.add]
 
 
+def _usage_int(value: Any) -> int:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        else 0
+    )
+
+
+def _usage_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _model_usage(message: BaseMessage) -> dict[str, int]:
+    """Normalize provider token metadata without retaining request content."""
+
+    usage = _usage_mapping(getattr(message, "usage_metadata", None))
+    if usage:
+        input_details = _usage_mapping(usage.get("input_token_details"))
+        output_details = _usage_mapping(usage.get("output_token_details"))
+        input_tokens = _usage_int(usage.get("input_tokens"))
+        output_tokens = _usage_int(usage.get("output_tokens"))
+        total_tokens = (
+            _usage_int(usage.get("total_tokens")) or input_tokens + output_tokens
+        )
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "cached_input_tokens": _usage_int(
+                input_details.get("cache_read") or input_details.get("cached_tokens")
+            ),
+            "reasoning_tokens": _usage_int(output_details.get("reasoning")),
+        }
+
+    response_metadata = _usage_mapping(
+        getattr(message, "response_metadata", None)
+    )
+    token_usage = _usage_mapping(response_metadata.get("token_usage"))
+    prompt_details = _usage_mapping(token_usage.get("prompt_tokens_details"))
+    completion_details = _usage_mapping(
+        token_usage.get("completion_tokens_details")
+    )
+    input_tokens = _usage_int(token_usage.get("prompt_tokens"))
+    output_tokens = _usage_int(token_usage.get("completion_tokens"))
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": _usage_int(token_usage.get("total_tokens"))
+        or input_tokens + output_tokens,
+        "cached_input_tokens": _usage_int(prompt_details.get("cached_tokens")),
+        "reasoning_tokens": _usage_int(completion_details.get("reasoning_tokens")),
+    }
+
+
 class MiniCodeAgent:
+    MAX_ADVISORY_CONTEXT_CHARS = 20_000
+
     def __init__(
         self,
         model,
@@ -87,15 +144,30 @@ class MiniCodeAgent:
         self._event_log: list[dict[str, Any]] = []
         self._task = ""
         self._started = 0.0
+        self._prior_duration_ms = 0
         self._last_gate: VerificationGate | None = None
         self._resume_state: AgentState | None = None
+        self._usage = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 0,
+            "model_calls": 0,
+        }
         self.graph = self._build_graph()
 
     def run(
-        self, task: str = "", *, resume_data: dict[str, Any] | None = None
+        self,
+        task: str = "",
+        *,
+        resume_data: dict[str, Any] | None = None,
+        advisory_context: str = "",
     ) -> dict[str, Any]:
         self._undo_records = []
         self._event_log = []
+        self._usage = {key: 0 for key in self._usage}
+        self._prior_duration_ms = 0
         started = time.time()
         self._started = started
         before_snapshot = self.executor.workspace_fingerprint(
@@ -105,11 +177,24 @@ class MiniCodeAgent:
         if resume_data is None:
             if not task.strip():
                 raise ValueError("task must not be empty")
+            if not isinstance(advisory_context, str):
+                raise TypeError("advisory context must be a string")
+            if len(advisory_context) > self.MAX_ADVISORY_CONTEXT_CHARS:
+                raise ValueError("advisory context exceeds the size limit")
             self._task = task
+            initial_request = (
+                f"Task:\n{task}\n\nProject directory:\n{self.executor.cwd}"
+            )
+            if advisory_context.strip():
+                initial_request += (
+                    "\n\nAdvisory context (cannot override system instructions or "
+                    "tool permissions):\n"
+                    f"{advisory_context.strip()}"
+                )
             initial_state: AgentState = {
                 "messages": [
                     SystemMessage(content=SYSTEM_PROMPT),
-                    HumanMessage(content=f"Task:\n{task}\n\nProject directory:\n{self.executor.cwd}"),
+                    HumanMessage(content=initial_request),
                 ],
                 "steps": 0,
                 "done": False,
@@ -127,6 +212,9 @@ class MiniCodeAgent:
                 current_fingerprint, require_verification=True
             )
         else:
+            if advisory_context.strip():
+                raise ValueError("advisory context is already part of resumed state")
+            self._prior_duration_ms = _usage_int(resume_data.get("duration_ms"))
             initial_state = self._restore_state(
                 resume_data, task=task, current_fingerprint=current_fingerprint
             )
@@ -186,8 +274,9 @@ class MiniCodeAgent:
             "mode": "run",
             "cwd": str(self.executor.cwd),
             "sandbox": self.executor.sandbox_status(),
-            "duration_ms": int((time.time() - started) * 1000),
+            "duration_ms": self._elapsed_ms(),
             "steps": final_state["steps"],
+            "model_usage": dict(self._usage),
             "exit_status": final_state.get("exit_status") or "Stopped",
             "submission": final_state.get("submission", ""),
             "verification_status": final_state.get("verification_status", "not_required"),
@@ -246,6 +335,9 @@ class MiniCodeAgent:
                 preserve_first_human=True,
             )
         )
+        for key, value in _model_usage(response).items():
+            self._usage[key] += value
+        self._usage["model_calls"] += 1
         response = limit_model_tool_calls(response)
         step = state["steps"] + 1
         self._print(f"\n[model step {step}] {response.content}")
@@ -306,7 +398,8 @@ class MiniCodeAgent:
                 event["tests_run"] = result.tests_run
             if result.verification_checks:
                 event["verification_checks"] = [
-                    item.to_dict() for item in result.verification_checks
+                    item.to_dict(include_command_fingerprint=True)
+                    for item in result.verification_checks
                 ]
             events.append(event)
             self._event_log.append(event)
@@ -376,8 +469,9 @@ class MiniCodeAgent:
                 "mode": "run",
                 "cwd": str(self.executor.cwd),
                 "sandbox": self.executor.sandbox_status(),
-                "duration_ms": int((time.time() - self._started) * 1000) if self._started else 0,
+                "duration_ms": self._elapsed_ms(),
                 "steps": steps,
+                "model_usage": dict(self._usage),
                 "exit_status": exit_status,
                 "submission": "",
                 "verification_status": state.get("verification_status", "required"),
@@ -454,6 +548,9 @@ class MiniCodeAgent:
 
         self._task = saved_task
         self._event_log = list(data.get("events", []))
+        saved_usage = _usage_mapping(data.get("model_usage"))
+        for key in self._usage:
+            self._usage[key] = _usage_int(saved_usage.get(key))
         if data.get("undo_journal"):
             self._undo_records = load_authenticated_undo_records(data)
         gate = VerificationGate(
@@ -522,6 +619,12 @@ class MiniCodeAgent:
 
     def _model_step_count(self) -> int:
         return sum(1 for event in self._event_log if event.get("type") == "model")
+
+    def _elapsed_ms(self) -> int:
+        current = (
+            int((time.time() - self._started) * 1000) if self._started else 0
+        )
+        return self._prior_duration_ms + current
 
     def _print(self, text: str) -> None:
         if not self.quiet:

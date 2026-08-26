@@ -84,7 +84,10 @@ jobs:
           assert len(archives) == 1, archives;
           names = tarfile.open(archives[0]).getnames();
           assert any(name.endswith('/evals/run_evals.py') for name in names), names;
-          assert any('/evals/fixtures/' in name for name in names), names"
+          assert any(name.endswith('/evals/run_memory_suite.py') for name in names), names;
+          assert any('/evals/fixtures/' in name for name in names), names;
+          assert any(name.endswith('/benchmarks/harbor/mca_agent.py') for name in names), names;
+          assert any(name.endswith('/benchmarks/harbor/protocol.json') for name in names), names"
       - run: python -m venv .package-venv
       - name: Install the wheel in the clean environment
         run: >-
@@ -95,6 +98,7 @@ jobs:
       - run: .package-venv/bin/mca --version
       - run: .package-venv/bin/mca --help
       - run: .package-venv/bin/mca doctor --sandbox none
+      - run: .package-venv/bin/python -c "import memory_core; import mini_code_agent"
       - run: .package-venv/bin/python -m pip check
       - run: .package-venv/bin/mca demo
 
@@ -112,10 +116,11 @@ jobs:
             requirements-ci.txt
       - run: python -m pip install -e .
       - run: python -m evals.run_evals --json --output artifacts/evals/v0.3.2.json
+      - run: python -m evals.run_memory_suite --json --output /tmp/memory-v0.5.0.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: verified-patch-eval
+          name: offline-eval-v0.3.2
           path: artifacts/evals/v0.3.2.json
           if-no-files-found: error
           retention-days: 7

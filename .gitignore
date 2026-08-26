@@ -15,3 +15,5 @@ build/
 dist/
 .DS_Store
 .worktrees/
+/Human-Preference-Tracking-Conversational-Agent/
+/evals/results/*.json

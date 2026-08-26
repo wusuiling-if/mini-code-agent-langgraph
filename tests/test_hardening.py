@@ -895,7 +895,10 @@ def test_run_checkpoint_can_resume_from_last_safe_boundary(
     ).run("inspect and verify")
     assert first["exit_status"] == "StepLimitExceeded"
     assert first["resumable"] is True
+    assert first["model_usage"]["model_calls"] == 1
 
+    resume_data = load_trajectory(trajectory)
+    resume_data["duration_ms"] = 100_000
     resumed = MiniCodeAgent(
         VerifyAndSubmitModel(),
         BashExecutor(
@@ -907,11 +910,13 @@ def test_run_checkpoint_can_resume_from_last_safe_boundary(
         max_steps=5,
         trajectory_path=trajectory,
         quiet=True,
-    ).run(resume_data=load_trajectory(trajectory))
+    ).run(resume_data=resume_data)
 
     assert resumed["exit_status"] == "Submitted"
     assert resumed["resumable"] is False
     assert resumed["steps"] == 3
+    assert resumed["model_usage"]["model_calls"] == 3
+    assert resumed["duration_ms"] >= 100_000
 
 
 def test_resume_discards_prior_matrix_evidence(

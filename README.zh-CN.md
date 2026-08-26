@@ -44,6 +44,7 @@ Demo 会运行两个确定性事务：第一个证明验证后的补丁在 commi
 mca tx run "Fix the failing tests" \
   --cwd /path/to/clean/git/repo \
   --model deepseek \
+  --memory local \
   --check tests "pytest -q"
 
 mca tx status TRANSACTION_ID
@@ -52,6 +53,72 @@ mca tx commit TRANSACTION_ID
 ```
 
 事务生命周期、receipt 字段、恢复和失败行为见 [事务协议](docs/transaction-protocol.md)。Provider、doctor、Agent Loop 和 sandbox 是次级集成，操作细节见 [Runtime Operations](docs/runtime-operations.md) 与 [Sandboxing](docs/sandboxing.md)。
+
+## 显式启用的记忆基础
+
+项目现已包含一套证据约束本地记忆基础：不可变记忆卡片、
+追加式时态状态、经过认证的证据与关系、SQLite FTS 检索，以及只读的
+`mca memory` 命令。默认情况下，`run`、`chat` 和 `tx` 都不会读取或写入记忆，
+因此现有行为和必需依赖保持不变。事务可显式设置 `--memory local`；成功 commit 后，
+Runtime 会确定性保存经过认证的验证流程和 receipt 绑定的真实补丁经验，但不会持久化验证
+命令正文。下一次同 workspace 的显式事务会直接通过原证据时态检索器读取并注入有限上下文；
+结果感知控制器因真实模型迁移测试退化而只保留为实验组件。
+
+宿主无关的 `memory_core` 已与 MCA 适配器分离：普通 CI receipt 和自定义 Agent 可以实现相同
+协议；MCA 只负责 transaction、Git 项目身份和 advisory 注入。上下文有 16K 硬预算，结构化
+检索审计不复制正文，项目移动后身份稳定，旧 repair 会按容量追加标记为 stale。私有 trajectory
+为支持 resume 仍保留实际注入的有限上下文。检索先在数据库层缩到当前作用域和 global，随后
+验签卡片与最新状态；其他项目的历史不再参与当前项目排序。
+
+泛用对话层还包含可重放的语义变更流、规范化 Checkpoint、提交后验收报告、尽量无损的
+SillyTavern 聊天适配器，以及不执行代码的酒馆助手导入预览。JavaScript 与远程模块加载器
+始终隔离；脚本数据、角色变量和聊天变量只会形成待做 Schema 映射的无权限候选，不会自动
+变成长期事实。核心身份与偏好不会因容量自动淘汰，情节/瞬时噪声仍可压缩或退休；新会话会
+为连续性事实保留有限预算，核心事实装不下时显式报告，而不是悄悄漏掉。详见
+[泛用对话记忆](docs/conversation-memory.md)。
+
+可选 embedding backend 支持任意 OpenAI-compatible endpoint：可以用远程 API，也可以指向本机
+或内网模型服务，因此不是必须本地部署。默认关闭；远程模式会发送硬过滤后的候选正文，本地模式
+隐私更好但需要自行运行模型。向量使用私有 SQLite 派生缓存，后端失败时自动退回原检索器。
+
+不使用 embedding 的 120-session 长期对话诊断中，显式认证写入后的离线检索为 10/10；
+DeepSeek 读取最近窗口为 30%，完整历史和证据时态记忆均为 90%，而记忆路径平均只注入 342
+字符。该结果不包含自由对话自动抽取；生产 `mca chat` 目前仍没有这条写入闭环。
+
+存储与信任模型、只读命令和当前能力边界见[本地记忆说明](docs/memory.md)，
+前沿项目与论文调研、分阶段方案见[时态经验记忆设计](docs/superpowers/specs/2026-08-17-evidence-bound-temporal-memory-design.md)。
+通用检索策略、四路消融基线、离线结果和可选真实模型评测见
+[记忆架构评测说明](docs/memory-evaluation.md)。
+历史在线模型记录属于实验材料，不作为发布门禁；确定性发布报告应从当前源码重新生成。
+
+无需 API Key 的四路对照：
+
+```bash
+.venv/bin/python -m evals.run_memory_comparison
+.venv/bin/python -m evals.run_memory_longitudinal
+.venv/bin/python -m evals.run_memory_control
+.venv/bin/python -m evals.run_memory_intervention
+```
+
+v0.5.0 的发布门禁用一个命令运行全部八个确定性记忆套件，不调用模型，并输出与评测源码绑定的
+统一 JSON 报告：
+
+```bash
+.venv/bin/python -m evals.run_memory_suite --json \
+  --output /tmp/memory-v0.5.0.json
+```
+
+结果感知控制、自由对话自动抽取和聊天格式导入仍属于实验范围。生产承诺与明确不做的事项见
+[项目范围](docs/project-scope.md)。
+
+## 公共 Benchmark：固定模型 Harness 对照
+
+v0.5.0 候选版已经接入 Harbor 0.22，并固定了一组来自公共 SWE-bench Verified 的 25 题
+pilot。实验只改变 Agent Harness：候选组使用 MCA，对照组使用
+`mini-swe-agent==2.1.0`，两组固定为同一个 `openai/gpt-5.6-sol` 模型和 provider
+endpoint。Launcher 默认只打印命令，不会产生模型费用，并提供双臂单题 `--smoke`；在两组
+真实运行完成且 Harbor 解析出的 task/image lock 一致前，项目不声明任何分数。运行协议、隔离边界和报告清单见
+[Harbor 固定模型对照](benchmarks/harbor/README.md)。
 
 ## 安全与可靠性边界
 
@@ -431,6 +498,11 @@ src/mini_code_agent/transaction.py 框架无关的事务状态机
 src/mini_code_agent/transaction_adapter.py Agent 工具调用与读写集适配层
 src/mini_code_agent/transaction_cli.py 事务命令编排与 Demo
 src/mini_code_agent/receipt.py     HMAC 认证的 prepared patch receipt
+src/memory_core/                   宿主无关的记忆协议、形成、预算与生命周期策略
+src/mini_code_agent/memory_adapters/ MCA receipt、Git 身份与 Agent 上下文适配器
+src/mini_code_agent/memory_models.py 不可变记忆模型与权限策略
+src/mini_code_agent/memory_store.py  HMAC 认证的 SQLite/FTS 记忆存储
+src/mini_code_agent/memory_admission.py Runtime 所有的证据解析与记忆准入
 src/mini_code_agent/locking.py     POSIX/Windows 事务文件锁
 src/mini_code_agent/security.py    路径与密钥安全
 src/mini_code_agent/cli.py         CLI、状态目录与授权模式
@@ -442,6 +514,7 @@ src/mini_code_agent/cli.py         CLI、状态目录与授权模式
 pytest -q
 python -m pip check
 python -m evals.run_evals --json
+python -m evals.run_memory_suite --json
 ```
 
 从源码 checkout 的仓库根目录精确复现 v0.3.2 verified-patch 基线：

@@ -1,5 +1,21 @@
 # Offline Verified Patch benchmark
 
+## Memory release gate
+
+The release-facing entry point runs all deterministic memory suites without
+provider credentials or model calls:
+
+```bash
+.venv/bin/python -m evals.run_memory_suite --json \
+  --output /tmp/memory-v0.5.0.json
+```
+
+The report contains each suite's machine-readable result, an aggregate gate,
+an explicit claims boundary, and a SHA-256 binding the runner sources. The
+outcome-controller and scripted agent-intervention suites remain labeled as
+experiments even though their deterministic wiring checks participate in the
+release gate. Paid real-model runners below are never required CI gates.
+
 This directory contains `verified-patch-v0.3.2`, an eleven-case deterministic
 benchmark for the production `MiniCodeAgent` loop and executor. It uses scripted
 local responses, standard-library-only fixtures, and disposable workspace copies.
@@ -54,6 +70,130 @@ workspace contents, secret values, Undo records, authentication keys, or
 persistence and internal state paths. Tool argument values and their private
 validation signatures are also omitted. Lifecycle files used by resume and
 Undo exist only inside the scenario's disposable temporary directory.
+
+## Deterministic memory formation
+
+The receipt-to-memory lifecycle has a separate offline suite:
+
+```bash
+.venv/bin/python -m evals.run_memory_formation
+.venv/bin/python -m evals.run_memory_formation --json
+```
+
+Its nine cases exercise default-off behavior, rejection before commit,
+authenticated formation after commit, replay idempotency, scoped retrieval,
+cross-commit evidence merging, verification-command change detection with
+superseded history, and
+rejection of legacy evidence that is not command-fingerprint-bound. It uses real
+disposable Git transactions and the production admission/store/retrieval path,
+but no model calls or free-text extraction.
+
+## Outcome-aware memory control
+
+The controller has a separate deterministic regression suite:
+
+```bash
+.venv/bin/python -m evals.run_memory_control
+.venv/bin/python -m evals.run_memory_control --json
+```
+
+Its six cases compare static retrieval with the outcome-aware control layer,
+exercise authenticated harmful/helpful feedback, explicit contraindications,
+abstention, stuck-stage requery, and shadow-policy isolation. It makes no model
+calls and does not claim learned-policy or open-world generalization.
+
+The production-loop intervention A/B is separate:
+
+```bash
+.venv/bin/python -m evals.run_memory_intervention
+.venv/bin/python -m evals.run_memory_intervention --json
+```
+
+It runs no-memory, static-retrieval, and controlled-memory conditions through
+the production `MiniCodeAgent`, executor, verification gate, and a real fixture
+test. A deterministic model stub reacts to advisory context, so this measures
+wiring, harmful-intervention containment, and step/edit overhead—not real-model
+quality.
+
+Run the same intervention with a paid/non-deterministic tool-calling model:
+
+```bash
+# First smoke-test only the controlled condition.
+.venv/bin/python -m evals.run_memory_intervention_model \
+  --provider deepseek --model deepseek-flash \
+  --condition controlled_memory
+
+# Then run all three conditions and save a sanitized report.
+.venv/bin/python -m evals.run_memory_intervention_model \
+  --provider deepseek --model deepseek-flash \
+  --output /tmp/memory-real-intervention.json
+```
+
+Credentials are read from the environment by the normal provider adapter.
+Reports omit responses, memory values, tool outputs, local paths, and credentials.
+
+For a harder three-file checkout repair, with balanced condition order and
+optional repeats:
+
+```bash
+.venv/bin/python -m evals.run_memory_complex_intervention_model \
+  --provider deepseek --model deepseek-flash --repeats 3 \
+  --output /tmp/memory-complex-real-intervention.json
+```
+
+The fixture requires coordinated discount, shipping, expedited surcharge, tax,
+and validation behavior across three implementation modules. Memory contains
+repository rules rather than literal test output.
+
+To remove hand-written memory and seeded outcomes entirely, run the natural
+experience-transfer protocol:
+
+```bash
+.venv/bin/python -m evals.run_memory_natural_intervention_model \
+  --provider deepseek --model deepseek-flash --repeats 3 \
+  --output /tmp/memory-natural-transfer.json
+```
+
+A real no-memory training run must first pass verification. Its implementation
+diff and authenticated outcome automatically form the only experience card.
+The three conditions then repair an unseen fixture with different filenames,
+function names, rates, thresholds, and amounts. Controller feedback is derived
+only from real verification outcomes.
+
+## Experimental conversation shadow extraction
+
+Free-conversation extraction remains outside the production runtime.  The
+experimental shadow evaluator proposes structured fact candidates from a
+sample of the 120-session conversation fixture, validates exact user-supported
+evidence quotes, and applies accepted lifecycle operations only to a separate
+temporary memory store:
+
+```bash
+.venv/bin/python -m evals.run_memory_shadow_extraction \
+  --provider deepseek --model deepseek-flash \
+  --output /tmp/memory-shadow-extraction.json
+```
+
+The A/B compares the existing raw-session reader with structured shadow memory.
+It reports candidate recall, filler-session false positives, rejection reasons,
+singleton supersession, multi-valued coexistence, explicit forgetting, scope
+isolation, reader accuracy, and store integrity.  The primary store is never
+mutated by candidates.  This is an extraction experiment, not a production
+automatic-write feature.
+
+The portable SillyTavern-format path has a smaller adversarial real-model
+exercise. It imports official-style JSONL fields and summary checkpoints, uses
+message/character formation policy with a protected recent window, and checks
+updates, explicit forgetting, hidden user authorship, assistant-only claims,
+and a hallucinated summary without enabling embeddings:
+
+```bash
+.venv/bin/python -m evals.run_sillytavern_memory_eval \
+  --provider deepseek --model deepseek-flash \
+  --output /tmp/sillytavern-portable-memory.json
+```
+
+All extracted candidates remain in a disposable shadow store.
 
 ## Scope boundary
 

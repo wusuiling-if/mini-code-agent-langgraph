@@ -12,7 +12,6 @@ from typing import Any
 
 from mini_code_agent.utils import MAX_STATE_FILE_BYTES, write_json
 
-
 RECEIPT_VERSION = 1
 
 
@@ -46,6 +45,13 @@ def issue_receipt(
         "transaction_id": manifest["id"],
         "issued_at_ns": time.time_ns(),
         "state": "prepared",
+        "workspace": {
+            "identity_sha256": manifest.get("workspace_identity_sha256")
+            or hashlib.sha256(
+                str(Path(manifest["source"]).resolve()).encode("utf-8")
+            ).hexdigest(),
+        },
+        "memory": {"mode": manifest.get("memory_mode", "off")},
         "baseline": {
             "commit": manifest["baseline_commit"],
             "workspace_fingerprint": manifest["baseline_fingerprint"],
@@ -159,6 +165,18 @@ def validate_receipt(
         "broad_read": provenance.get("broad_read"),
         "broad_write": provenance.get("broad_write"),
     }
+    if isinstance(payload.get("workspace"), dict):
+        expected["workspace_identity_sha256"] = manifest.get(
+            "workspace_identity_sha256"
+        ) or hashlib.sha256(
+            str(Path(manifest["source"]).resolve()).encode("utf-8")
+        ).hexdigest()
+        actual["workspace_identity_sha256"] = payload["workspace"].get(
+            "identity_sha256"
+        )
+    if isinstance(payload.get("memory"), dict):
+        expected["memory_mode"] = manifest.get("memory_mode", "off")
+        actual["memory_mode"] = payload["memory"].get("mode")
     mismatches = [key for key in expected if actual.get(key) != expected[key]]
     if mismatches:
         raise ReceiptError(
@@ -206,6 +224,7 @@ def _verification_checks(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
                     "exception_info",
                     "blocked",
                     "approved",
+                    "command_sha256",
                 )
                 if key in raw
             }
