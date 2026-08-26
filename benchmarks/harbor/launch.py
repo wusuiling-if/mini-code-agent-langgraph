@@ -7,7 +7,9 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -15,10 +17,33 @@ from typing import Any
 from benchmarks.harbor.protocol import split_harbor_model
 
 HERE = Path(__file__).resolve().parent
+PROJECT_ROOT = HERE.parents[1]
 DEFAULT_PROTOCOL = HERE / "protocol.json"
 _EXACT_PACKAGE = re.compile(r"^[A-Za-z0-9_.-]+==[^=<>!~\s]+$")
 _VCS_COMMIT = re.compile(r"^git\+[^\s]+@[0-9a-fA-F]{40}(?:[#?].*)?$")
 _HASHED_WHEEL_URL = re.compile(r"^https://[^\s]+\.whl#sha256=[0-9a-fA-F]{64}$")
+
+
+def normalize_task_ref(task_name: str) -> str:
+    """Return the fully-qualified task reference required by Harbor 0.22."""
+
+    task_ref = task_name if "/" in task_name else f"swe-bench/{task_name}"
+    org, name = task_ref.split("/", 1)
+    if org != "swe-bench" or not name:
+        raise ValueError(f"unexpected pilot task reference: {task_name!r}")
+    return task_ref
+
+
+def resolve_harbor_executable() -> str:
+    """Find Harbor on PATH or beside the active Python executable."""
+
+    executable = shutil.which("harbor")
+    if executable:
+        return executable
+    sibling = Path(sys.executable).with_name("harbor")
+    if sibling.is_file():
+        return str(sibling)
+    return "harbor"
 
 
 def load_protocol(path: Path = DEFAULT_PROTOCOL) -> dict[str, Any]:
@@ -37,12 +62,9 @@ def load_task_names(protocol: dict[str, Any], protocol_path: Path) -> list[str]:
         raise ValueError("pilot task file must contain a non-empty task list")
     names: list[str] = []
     for task in tasks:
-        if not isinstance(task, str) or "/" not in task:
-            raise ValueError("pilot tasks must use org/task references")
-        org, name = task.split("/", 1)
-        if org != "swe-bench" or not name:
-            raise ValueError(f"unexpected pilot task reference: {task!r}")
-        names.append(name)
+        if not isinstance(task, str):
+            raise TypeError("pilot tasks must use org/task references")
+        names.append(normalize_task_ref(task))
     if len(names) != dataset["subset_size"] or len(names) != len(set(names)):
         raise ValueError("pilot task count or uniqueness does not match protocol")
     return names
@@ -73,7 +95,11 @@ def build_harbor_command(
         )
     arm = comparison[role]
     pinned_tasks = load_task_names(protocol, protocol_path)
-    selected_tasks = list(task_names) if task_names is not None else pinned_tasks
+    selected_tasks = (
+        [normalize_task_ref(name) for name in task_names]
+        if task_names is not None
+        else pinned_tasks
+    )
     if not selected_tasks:
         raise ValueError("at least one benchmark task must be selected")
     if len(selected_tasks) != len(set(selected_tasks)):
@@ -105,6 +131,10 @@ def build_harbor_command(
         "--job-name",
         role,
     ]
+    for key, value in protocol["harness"].get("agent_env", {}).items():
+        argv.extend(("--agent-env", f"{key}={value}"))
+    for key, value in protocol["harness"].get("verifier_env", {}).items():
+        argv.extend(("--verifier-env", f"{key}={value}"))
     for task_name in selected_tasks:
         argv.extend(("--include-task-name", task_name))
     if role == "baseline":
@@ -115,6 +145,13 @@ def build_harbor_command(
         argv.extend(("--agent-kwarg", f"max_steps={arm['max_steps']}"))
         argv.extend(("--agent-kwarg", f"context_chars={arm['context_chars']}"))
         argv.extend(("--agent-kwarg", "max_retries=0"))
+        argv.extend(("--agent-kwarg", f"resume_attempts={arm['resume_attempts']}"))
+        argv.extend(
+            (
+                "--agent-kwarg",
+                f"resume_backoff_seconds={arm['resume_backoff_seconds']}",
+            )
+        )
         allow_shell = str(bool(arm["allow_shell"])).lower()
         argv.extend(("--agent-kwarg", f"allow_shell={allow_shell}"))
     return argv
@@ -126,7 +163,15 @@ def build_execution_environment(
     """Resolve one credential and endpoint into both Harbor agent conventions."""
 
     env = dict(os.environ if environ is None else environ)
+    python_path = env.get("PYTHONPATH")
+    project_root = str(PROJECT_ROOT)
+    env["PYTHONPATH"] = (
+        os.pathsep.join((project_root, python_path)) if python_path else project_root
+    )
     comparison = protocol["comparison"]
+    docker_platform = protocol["harness"].get("docker_platform")
+    if docker_platform:
+        env["DOCKER_DEFAULT_PLATFORM"] = docker_platform
     provider, _model = split_harbor_model(comparison["model"])
     base_url = comparison.get("base_url")
     if provider == "openai":
@@ -220,6 +265,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.jobs_dir / role,
             n_concurrent=args.n_concurrent,
             package_spec=args.package_spec,
+            executable=resolve_harbor_executable(),
             task_names=task_names,
         )
         for role in ("baseline", "candidate")

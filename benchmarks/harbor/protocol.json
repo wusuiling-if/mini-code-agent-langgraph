@@ -1,10 +1,19 @@
 {
   "schema_version": 1,
-  "status": "adapter-ready-no-score",
+  "status": "smoke-validated-pilot-pending",
   "harness": {
     "name": "harbor",
     "version": "0.22.0",
-    "environment": "docker"
+    "environment": "docker",
+    "docker_platform": "linux/amd64",
+    "agent_env": {
+      "UV_CONCURRENT_DOWNLOADS": "1",
+      "UV_HTTP_TIMEOUT": "120"
+    },
+    "verifier_env": {
+      "UV_CONCURRENT_DOWNLOADS": "1",
+      "UV_HTTP_TIMEOUT": "120"
+    }
   },
   "dataset": {
     "ref": "swe-bench/swe-bench-verified@sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341",
@@ -29,6 +38,8 @@
       "package": "mini-code-agent-langgraph==0.5.0",
       "memory": "off",
       "allow_shell": true,
+      "resume_attempts": 3,
+      "resume_backoff_seconds": 10,
       "max_steps": 50,
       "context_chars": 60000
     }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -10,10 +11,13 @@ from benchmarks.harbor.launch import (
     build_harbor_command,
     load_protocol,
     main,
+    normalize_task_ref,
+    resolve_harbor_executable,
     validate_package_spec,
 )
 from benchmarks.harbor.protocol import (
     HarborRunConfig,
+    build_agent_install_command,
     build_transaction_command,
     load_latest_run,
     split_harbor_model,
@@ -41,7 +45,12 @@ def test_transaction_command_keeps_memory_and_shell_disabled() -> None:
     )
 
     assert "mca tx run" in command
+    assert '. "$HOME/.local/bin/env"' in command
     assert "--memory off" in command
+    assert 'resume_count" -lt 3' in command
+    assert 'sleep "$((resume_count * 10))"' in command
+    assert 'mca tx resume "$transaction_id"' in command
+    assert "eval " not in command
     assert "--sandbox none" in command
     assert "--allow-shell" not in command
     assert "git diff --check" in command
@@ -57,6 +66,17 @@ def test_shell_is_an_explicit_benchmark_ablation() -> None:
         config=HarborRunConfig(allow_shell=True),
     )
     assert "--allow-shell" in command
+
+
+def test_agent_install_reuses_pinned_image_uv_before_downloading() -> None:
+    command = build_agent_install_command("mini-code-agent-langgraph==0.5.0")
+    first_load = command.index('. "$HOME/.local/bin/env"')
+    availability_check = command.index("command -v uv")
+
+    assert first_load < availability_check
+    assert "https://astral.sh/uv/0.7.13/install.sh" in command
+    assert "mini-code-agent-langgraph==0.5.0" in command
+    assert "for install_attempt in $(seq 1 3)" in command
 
 
 def test_usage_and_latest_transaction_are_sanitized_aggregates(tmp_path: Path) -> None:
@@ -93,7 +113,7 @@ def test_usage_and_latest_transaction_are_sanitized_aggregates(tmp_path: Path) -
 
 def test_protocol_builds_paired_fixed_model_commands(tmp_path: Path) -> None:
     protocol = load_protocol()
-    assert protocol["status"] == "adapter-ready-no-score"
+    assert protocol["status"] == "smoke-validated-pilot-pending"
     assert protocol["comparison"]["model"] == "openai/gpt-5.6-sol"
     assert protocol["comparison"]["base_url"] == "https://api.dstopology.com/v1"
     assert protocol["dataset"]["ref"].endswith(
@@ -109,15 +129,27 @@ def test_protocol_builds_paired_fixed_model_commands(tmp_path: Path) -> None:
 
     for command in (baseline, candidate):
         assert command.count("--include-task-name") == 25
+        selected = [
+            command[index + 1]
+            for index, value in enumerate(command)
+            if value == "--include-task-name"
+        ]
+        assert all(name.startswith("swe-bench/") for name in selected)
         assert command[command.index("--dataset") + 1] == protocol["dataset"]["ref"]
         assert command[command.index("--model") + 1] == "openai/gpt-5.6-sol"
         assert command[command.index("--n-attempts") + 1] == "1"
         assert command[command.index("--max-retries") + 1] == "0"
+        assert "UV_CONCURRENT_DOWNLOADS=1" in command
+        assert "UV_HTTP_TIMEOUT=120" in command
+        assert command.count("--agent-env") == 2
+        assert command.count("--verifier-env") == 2
     assert "mini-swe-agent" in baseline
     assert "version=2.1.0" in baseline
     assert "benchmarks.harbor.mca_agent:MiniCodeAgentHarborAdapter" in candidate
     assert "package_spec=mini-code-agent-langgraph==0.5.0" in candidate
     assert "allow_shell=true" in candidate
+    assert "resume_attempts=3" in candidate
+    assert "resume_backoff_seconds=10" in candidate
 
 
 def test_protocol_rejects_model_drift(tmp_path: Path) -> None:
@@ -148,7 +180,31 @@ def test_single_task_smoke_is_paired_and_pinned(
     assert len(commands) == 2
     for command in commands:
         assert command.count("--include-task-name") == 1
-        assert task_name in command
+        assert f"swe-bench/{task_name}" in command
+
+
+def test_task_reference_normalization_matches_harbor_filter_contract() -> None:
+    assert normalize_task_ref("matplotlib__matplotlib-14623") == (
+        "swe-bench/matplotlib__matplotlib-14623"
+    )
+    assert normalize_task_ref("swe-bench/matplotlib__matplotlib-14623") == (
+        "swe-bench/matplotlib__matplotlib-14623"
+    )
+    with pytest.raises(ValueError, match="unexpected pilot task reference"):
+        normalize_task_ref("other/task")
+
+
+def test_harbor_executable_falls_back_to_active_python_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    python = tmp_path / "bin" / "python"
+    harbor = python.with_name("harbor")
+    harbor.parent.mkdir(parents=True)
+    harbor.touch()
+    monkeypatch.setattr("benchmarks.harbor.launch.shutil.which", lambda _name: None)
+    monkeypatch.setattr("benchmarks.harbor.launch.sys.executable", str(python))
+
+    assert resolve_harbor_executable() == str(harbor)
 
 
 def test_selected_tasks_must_belong_to_pinned_pilot(tmp_path: Path) -> None:
@@ -162,11 +218,18 @@ def test_selected_tasks_must_belong_to_pinned_pilot(tmp_path: Path) -> None:
 
 
 def test_execution_environment_routes_both_arms_through_pinned_endpoint() -> None:
-    env = build_execution_environment(load_protocol(), {"OPENAI_API_KEY": "secret"})
+    env = build_execution_environment(
+        load_protocol(),
+        {"OPENAI_API_KEY": "secret", "PYTHONPATH": "/existing/modules"},
+    )
     assert env["OPENAI_API_KEY"] == "secret"
     assert env["MCA_API_KEY"] == "secret"
     assert env["OPENAI_BASE_URL"] == "https://api.dstopology.com/v1"
     assert env["MCA_BASE_URL"] == "https://api.dstopology.com/v1"
+    assert env["DOCKER_DEFAULT_PLATFORM"] == "linux/amd64"
+    project_root, existing = env["PYTHONPATH"].split(os.pathsep, 1)
+    assert Path(project_root) == Path(__file__).resolve().parents[1]
+    assert existing == "/existing/modules"
 
 
 def test_execution_environment_requires_a_provider_key() -> None:
