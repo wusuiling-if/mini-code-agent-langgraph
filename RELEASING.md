@@ -39,6 +39,7 @@ up-to-date checkout of `main`, confirm that `pyproject.toml` and
 ```bash
 python -m pytest -q
 python -m evals.run_evals --json
+python -m evals.run_memory_suite --json
 python -m pip check
 python -m build --sdist --wheel
 python -m twine check dist/*

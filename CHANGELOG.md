@@ -4,6 +4,33 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-26
+
+### Added
+
+- Added an opt-in, evidence-bound local memory path for transactional runs. `mca tx run --memory local` retrieves bounded same-project advisory context, and a successful conflict-checked commit forms authenticated workflow and verified-repair memories from the transaction receipt.
+- Added the read-only `mca memory status/search/show/sources/verify/health` CLI, a host-neutral `memory_core` package, stable Git project identity, temporal lifecycle state, SQLite FTS retrieval, authenticated evidence and edges, capacity retirement, and an optional OpenAI-compatible embedding candidate route with private caching and lexical fallback.
+- Added deterministic memory gates for core integrity, architecture comparison, receipt-to-memory formation, host portability, 120-session longitudinal retention, long-conversation reading after explicit ingestion, outcome-control experiments, and production-loop intervention wiring. `python -m evals.run_memory_suite` runs all eight without model calls and emits one source-bound report.
+- Added replayable conversation mutations, canonical checkpoints, continuity budgets, and quarantined SillyTavern/Tavern Helper import adapters as experimental portability work; they are not connected to production `mca chat` extraction.
+- Added a Harbor 0.22 installed-agent adapter and a machine-readable 25-task SWE-bench Verified pilot for fixed-model harness comparison against `mini-swe-agent==2.1.0`. The protocol pins the dataset content hash, `openai/gpt-5.6-sol`, and its provider endpoint; the launcher supports a paired one-task smoke and rejects model/task drift, and no benchmark score is claimed in this release.
+- Added normalized per-run model token and call counts to private trajectories/checkpoints so public harness reports can compare usage as well as task reward.
+
+### Changed
+
+- Kept memory disabled by default and limited production writes to authenticated, committed transaction evidence. Existing `run`, `chat`, and `tx` behavior remains unchanged unless `--memory local` is selected.
+- Separated the host-neutral memory contracts from MCA-specific transaction, project-identity, semantic-provider, and agent-context adapters.
+
+### Fixed
+
+- Fixed generated `mca tx resume` commands after `StepLimitExceeded` so the cumulative step ceiling increases beyond the saved checkpoint instead of immediately repeating the same failure.
+- Preserved transaction-only memory retrieval audit metadata across open failures and resumed trajectories; cumulative model usage and elapsed duration already recorded before the checkpoint are retained as well.
+
+### Security
+
+- Memory retrieval authenticates cards and current temporal state after hard scope, authority, validity, and lifecycle filtering. Structured retrieval audits store hashes and decisions rather than memory content.
+- Injected memory is advisory and cannot grant tool authority. External or derived evidence cannot launder higher authority, and post-commit memory indexing failure cannot make a successful source commit appear rolled back.
+- Automatic free-conversation extraction, remote script execution, and learned outcome policies remain outside the production boundary. The outcome-aware controller and real-model studies are experiments, not release claims.
+
 ## [0.4.0] - 2026-07-31
 
 ### Added
