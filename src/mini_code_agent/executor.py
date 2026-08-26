@@ -25,6 +25,7 @@ from mini_code_agent.checks import (
     VerificationCheckExecution,
     normalize_verification_checks,
     run_verification_matrix,
+    verification_command_sha256,
 )
 from mini_code_agent.contracts import ToolResult
 from mini_code_agent.security import SafeWorkspace, SecretRedactor
@@ -831,6 +832,7 @@ class CommandExecutor:
                     duration_ms=0,
                     exception_info=blocked_reason,
                     blocked=True,
+                    command_sha256=verification_command_sha256(check.command),
                 )
                 return ToolResult(
                     tool="run_tests",
@@ -877,6 +879,7 @@ class CommandExecutor:
                     ),
                     blocked=result.blocked,
                     approved=result.approved,
+                    command_sha256=verification_command_sha256(check.command),
                 ),
                 output=result.output,
             )

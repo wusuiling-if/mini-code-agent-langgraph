@@ -311,7 +311,8 @@ class ConversationalCodeAgent:
             event["tests_run"] = result.tests_run
         if result.verification_checks:
             event["verification_checks"] = [
-                item.to_dict() for item in result.verification_checks
+                item.to_dict(include_command_fingerprint=True)
+                for item in result.verification_checks
             ]
         return self.executor.redactor.redact_data(event)
 

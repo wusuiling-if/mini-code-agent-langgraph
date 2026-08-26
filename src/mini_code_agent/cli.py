@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import secrets
@@ -175,10 +176,22 @@ def _state_root() -> Path:
     if override:
         return Path(override).expanduser()
     if os.name == "nt":
-        return Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "mini-code-agent"
+        return (
+            Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+            / "mini-code-agent"
+        )
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "mini-code-agent" / "state"
-    return Path(os.getenv("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "mini-code-agent"
+        return (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "mini-code-agent"
+            / "state"
+        )
+    return (
+        Path(os.getenv("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+        / "mini-code-agent"
+    )
 
 
 def _config_root() -> Path:
@@ -186,10 +199,15 @@ def _config_root() -> Path:
     if override:
         return Path(override).expanduser()
     if os.name == "nt":
-        return Path(os.getenv("APPDATA", Path.home() / "AppData" / "Roaming")) / "mini-code-agent"
+        return (
+            Path(os.getenv("APPDATA", Path.home() / "AppData" / "Roaming"))
+            / "mini-code-agent"
+        )
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "mini-code-agent"
-    return Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")) / "mini-code-agent"
+    return (
+        Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")) / "mini-code-agent"
+    )
 
 
 def _ensure_private_directory(path: Path) -> Path:
@@ -203,7 +221,9 @@ def _ensure_private_directory(path: Path) -> Path:
     if os.name != "nt":
         metadata = path.stat()
         if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
-            raise PermissionError(f"private state path is not owned by this user: {path}")
+            raise PermissionError(
+                f"private state path is not owned by this user: {path}"
+            )
         path.chmod(0o700)
     return path
 
@@ -220,22 +240,24 @@ def _reserve_output_path(explicit: Path | None, kind: str) -> Path:
     try:
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError as exc:
-        raise RuntimeError(f"output file already exists; refusing to overwrite: {path}") from exc
+        raise RuntimeError(
+            f"output file already exists; refusing to overwrite: {path}"
+        ) from exc
     os.close(descriptor)
     if os.name != "nt":
         path.chmod(0o600)
     return path
 
 
-def _resume_output_path(
-    resume: Path | None, explicit: Path | None, kind: str
-) -> Path:
+def _resume_output_path(resume: Path | None, explicit: Path | None, kind: str) -> Path:
     if resume is None:
         return _reserve_output_path(explicit, kind)
     source = resume.expanduser()
     metadata = source.lstat()
     if source.is_symlink() or not stat.S_ISREG(metadata.st_mode):
-        raise RuntimeError(f"resume trajectory must be a regular non-symlink file: {source}")
+        raise RuntimeError(
+            f"resume trajectory must be a regular non-symlink file: {source}"
+        )
     source = source.resolve()
     if explicit is not None and explicit.expanduser().resolve() != source:
         return _reserve_output_path(explicit, kind)
@@ -259,14 +281,18 @@ def _load_secure_env_file(path: Path) -> None:
     if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
         raise PermissionError(f"env file is not owned by this user: {path}")
     if os.name != "nt" and stat.S_IMODE(metadata.st_mode) & 0o077:
-        raise RuntimeError(f"env file permissions are too broad: {path}; run chmod 600 {path}")
+        raise RuntimeError(
+            f"env file permissions are too broad: {path}; run chmod 600 {path}"
+        )
     load_env_file(path)
 
 
 def _load_runtime_env(explicit: Path | None) -> Path | None:
     """Load an explicit env file or the private file created by ``mca init``."""
 
-    candidate = explicit.expanduser() if explicit is not None else _config_root() / "env"
+    candidate = (
+        explicit.expanduser() if explicit is not None else _config_root() / "env"
+    )
     if explicit is None and not candidate.exists():
         return None
     _load_secure_env_file(candidate)
@@ -286,7 +312,9 @@ def _model_from_args(args: argparse.Namespace):
 
 def _add_transaction_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", required=True, help="Model name.")
-    parser.add_argument("--provider", choices=["auto", "deepseek", "openai"], default="auto")
+    parser.add_argument(
+        "--provider", choices=["auto", "deepseek", "openai"], default="auto"
+    )
     parser.add_argument("--base-url", default=None, help="Provider API base URL.")
     parser.add_argument("--env-file", type=Path, default=None)
     parser.add_argument("--max-steps", type=_positive_int, default=50)
@@ -295,6 +323,42 @@ def _add_transaction_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--request-timeout", type=_positive_float, default=60.0)
     parser.add_argument("--max-retries", type=_non_negative_int, default=2)
     parser.add_argument("--deepseek-thinking", action="store_true")
+    parser.add_argument(
+        "--memory",
+        choices=["off", "local"],
+        default=None,
+        help=(
+            "Retrieve same-project memory and persist verified workflow/repair "
+            "experience after commit; defaults to off."
+        ),
+    )
+    parser.add_argument(
+        "--embedding-base-url",
+        default=None,
+        help=(
+            "Optional OpenAI-compatible embedding API base URL. Only used with "
+            "--memory local; defaults to MCA_EMBEDDING_BASE_URL."
+        ),
+    )
+    parser.add_argument(
+        "--embedding-model",
+        default=None,
+        help=(
+            "Optional embedding model name; defaults to MCA_EMBEDDING_MODEL. "
+            "Both model and base URL are required to enable semantic retrieval."
+        ),
+    )
+    parser.add_argument(
+        "--embedding-api-key-env",
+        default="MCA_EMBEDDING_API_KEY",
+        help="Environment variable containing the optional embedding API key.",
+    )
+    parser.add_argument(
+        "--embedding-timeout",
+        type=_positive_float,
+        default=30.0,
+        help="Embedding request timeout in seconds.",
+    )
     parser.add_argument("--test-command", type=_non_empty_command, default=None)
     parser.add_argument(
         "--check",
@@ -318,16 +382,26 @@ def _add_transaction_runtime_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="mca", description="Mini LangGraph coding agent.")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser = argparse.ArgumentParser(
+        prog="mca", description="Mini LangGraph coding agent."
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run = subparsers.add_parser("run", help="Run the coding agent on a task.")
     run.add_argument("task", nargs="?", help="Task for a new agent run.")
-    run.add_argument("--cwd", default=None, help="Project directory. Defaults to current directory.")
-    run.add_argument("--resume", type=Path, default=None, help="Resume an unfinished run trajectory.")
+    run.add_argument(
+        "--cwd", default=None, help="Project directory. Defaults to current directory."
+    )
+    run.add_argument(
+        "--resume", type=Path, default=None, help="Resume an unfinished run trajectory."
+    )
     run.add_argument("--model", required=True, help="Model name.")
-    run.add_argument("--provider", choices=["auto", "deepseek", "openai"], default="auto")
+    run.add_argument(
+        "--provider", choices=["auto", "deepseek", "openai"], default="auto"
+    )
     run.add_argument("--base-url", default=None, help="Provider API base URL.")
     run.add_argument(
         "--env-file",
@@ -335,16 +409,30 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Load API keys from this file; defaults to the private file created by mca init.",
     )
-    run.add_argument("--max-steps", type=_positive_int, default=50, help="Maximum model calls.")
+    run.add_argument(
+        "--max-steps", type=_positive_int, default=50, help="Maximum model calls."
+    )
     run.add_argument(
         "--context-chars",
         type=_positive_int,
         default=60_000,
         help="Hard approximate character budget for model context.",
     )
-    run.add_argument("--timeout", type=_positive_int, default=30, help="Timeout per command in seconds.")
-    run.add_argument("--request-timeout", type=_positive_float, default=60.0, help="LLM request timeout in seconds.")
-    run.add_argument("--max-retries", type=_non_negative_int, default=2, help="LLM request retries.")
+    run.add_argument(
+        "--timeout",
+        type=_positive_int,
+        default=30,
+        help="Timeout per command in seconds.",
+    )
+    run.add_argument(
+        "--request-timeout",
+        type=_positive_float,
+        default=60.0,
+        help="LLM request timeout in seconds.",
+    )
+    run.add_argument(
+        "--max-retries", type=_non_negative_int, default=2, help="LLM request retries."
+    )
     run.add_argument(
         "--deepseek-thinking",
         action="store_true",
@@ -371,7 +459,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Allow a recognized zero-test result to satisfy verification.",
     )
     run.add_argument("--output", type=Path, default=None, help="Trajectory JSON path.")
-    run.add_argument("--allow-shell", action="store_true", help="Allow arbitrary bash tool calls.")
+    run.add_argument(
+        "--allow-shell", action="store_true", help="Allow arbitrary bash tool calls."
+    )
     run.add_argument(
         "--sandbox",
         choices=["auto", "sandbox-exec", "bwrap", "docker", "none"],
@@ -383,9 +473,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Pre-pulled image for the Docker sandbox; defaults to MCA_DOCKER_IMAGE or python:3.11-slim.",
     )
-    run.add_argument("--allow-dirty", action="store_true", help="Allow running in a dirty git worktree.")
+    run.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Allow running in a dirty git worktree.",
+    )
     run.add_argument("--require-clean", action="store_true", help=argparse.SUPPRESS)
-    run.add_argument("--yolo", action="store_true", help="Run commands without confirmation.")
+    run.add_argument(
+        "--yolo", action="store_true", help="Run commands without confirmation."
+    )
     run.add_argument("--yes", action="store_true", help="Alias for --yolo.")
     run.add_argument("--quiet", action="store_true", help="Hide step output.")
 
@@ -400,7 +496,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     transaction_run.add_argument("task", help="Task for the transactional run.")
     transaction_run.add_argument(
-        "--cwd", default=None, help="Clean Git worktree root. Defaults to current directory."
+        "--cwd",
+        default=None,
+        help="Clean Git worktree root. Defaults to current directory.",
     )
     _add_transaction_runtime_arguments(transaction_run)
     transaction_resume = transaction_commands.add_parser(
@@ -417,14 +515,53 @@ def build_parser() -> argparse.ArgumentParser:
         command = transaction_commands.add_parser(name, help=help_text)
         command.add_argument("transaction_id")
     transaction_commands.add_parser(
-        "demo", help="Demonstrate successful commit and conflict refusal without an API key."
+        "demo",
+        help="Demonstrate successful commit and conflict refusal without an API key.",
     )
 
-    chat = subparsers.add_parser("chat", help="Start a persistent chat-and-code session.")
-    chat.add_argument("--cwd", default=None, help="Project directory. Defaults to current directory.")
-    chat.add_argument("--resume", type=Path, default=None, help="Resume a saved chat trajectory.")
+    memory = subparsers.add_parser(
+        "memory", help="Inspect the optional local evidence-bound memory store."
+    )
+    memory_commands = memory.add_subparsers(dest="memory_command", required=True)
+    memory_commands.add_parser(
+        "status", help="Show initialization, schema, and record counts."
+    )
+    memory_search = memory_commands.add_parser(
+        "search", help="Search abstraction and cue-anchor indexes."
+    )
+    memory_search.add_argument("query")
+    memory_search.add_argument("--limit", type=_positive_int, default=10)
+    memory_search.add_argument(
+        "--all-statuses",
+        action="store_true",
+        help="Include superseded, disputed, stale, and tombstoned cards.",
+    )
+    for name, help_text in (
+        ("show", "Show one authenticated memory card."),
+        ("sources", "Show authenticated evidence references for a card."),
+    ):
+        command = memory_commands.add_parser(name, help=help_text)
+        command.add_argument("memory_id")
+    memory_commands.add_parser(
+        "verify", help="Verify SQLite integrity, HMACs, references, and the FTS index."
+    )
+    memory_commands.add_parser(
+        "health", help="Show integrity, lifecycle debt, scopes, and database size."
+    )
+
+    chat = subparsers.add_parser(
+        "chat", help="Start a persistent chat-and-code session."
+    )
+    chat.add_argument(
+        "--cwd", default=None, help="Project directory. Defaults to current directory."
+    )
+    chat.add_argument(
+        "--resume", type=Path, default=None, help="Resume a saved chat trajectory."
+    )
     chat.add_argument("--model", default="deepseek", help="Chat model name.")
-    chat.add_argument("--provider", choices=["auto", "deepseek", "openai"], default="auto")
+    chat.add_argument(
+        "--provider", choices=["auto", "deepseek", "openai"], default="auto"
+    )
     chat.add_argument("--base-url", default=None, help="Provider API base URL.")
     chat.add_argument(
         "--env-file",
@@ -432,16 +569,33 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Load API keys from this file; defaults to the private file created by mca init.",
     )
-    chat.add_argument("--max-steps", type=_positive_int, default=20, help="Maximum model calls per user turn.")
+    chat.add_argument(
+        "--max-steps",
+        type=_positive_int,
+        default=20,
+        help="Maximum model calls per user turn.",
+    )
     chat.add_argument(
         "--context-chars",
         type=_positive_int,
         default=60_000,
         help="Hard approximate character budget for persistent model context.",
     )
-    chat.add_argument("--timeout", type=_positive_int, default=30, help="Timeout per command in seconds.")
-    chat.add_argument("--request-timeout", type=_positive_float, default=60.0, help="LLM request timeout in seconds.")
-    chat.add_argument("--max-retries", type=_non_negative_int, default=2, help="LLM request retries.")
+    chat.add_argument(
+        "--timeout",
+        type=_positive_int,
+        default=30,
+        help="Timeout per command in seconds.",
+    )
+    chat.add_argument(
+        "--request-timeout",
+        type=_positive_float,
+        default=60.0,
+        help="LLM request timeout in seconds.",
+    )
+    chat.add_argument(
+        "--max-retries", type=_non_negative_int, default=2, help="LLM request retries."
+    )
     chat.add_argument(
         "--deepseek-thinking",
         action="store_true",
@@ -467,7 +621,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow a recognized zero-test result to satisfy verification.",
     )
-    chat.add_argument("--output", type=Path, default=None, help="Session trajectory JSON path.")
+    chat.add_argument(
+        "--output", type=Path, default=None, help="Session trajectory JSON path."
+    )
     chat.add_argument("--allow-shell", action="store_true")
     chat.add_argument(
         "--sandbox",
@@ -480,24 +636,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pre-pulled image for the Docker sandbox; defaults to MCA_DOCKER_IMAGE or python:3.11-slim.",
     )
     chat.add_argument("--allow-dirty", action="store_true")
-    chat.add_argument("--yes", action="store_true", help="Approve writes and commands without prompting.")
+    chat.add_argument(
+        "--yes",
+        action="store_true",
+        help="Approve writes and commands without prompting.",
+    )
     chat.add_argument("--quiet", action="store_true", help="Hide tool output.")
 
     trace = subparsers.add_parser("trace", help="Summarize a trajectory file.")
     trace.add_argument("trajectory", type=Path)
-    trace.add_argument("--diff", action="store_true", help="Print file diffs captured in the trajectory.")
+    trace.add_argument(
+        "--diff",
+        action="store_true",
+        help="Print file diffs captured in the trajectory.",
+    )
 
-    undo = subparsers.add_parser("undo", help="Undo structured file edits from a trajectory.")
+    undo = subparsers.add_parser(
+        "undo", help="Undo structured file edits from a trajectory."
+    )
     undo.add_argument("trajectory", type=Path)
-    undo.add_argument("--dry-run", action="store_true", help="Show undo actions without writing files.")
-    undo.add_argument("--force", action="store_true", help="Undo even if files changed after the agent edit.")
+    undo.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show undo actions without writing files.",
+    )
+    undo.add_argument(
+        "--force",
+        action="store_true",
+        help="Undo even if files changed after the agent edit.",
+    )
     undo.add_argument(
         "--allow-legacy-unsafe",
         action="store_true",
         help="Allow unsigned 0.1/0.2 undo data (unsafe; inspect the file first).",
     )
 
-    init = subparsers.add_parser("init", help="Create a private env/config starter file.")
+    init = subparsers.add_parser(
+        "init", help="Create a private env/config starter file."
+    )
     init.add_argument(
         "--path",
         type=Path,
@@ -513,9 +689,7 @@ def build_parser() -> argparse.ArgumentParser:
     sandbox = subparsers.add_parser(
         "sandbox", help="Inspect command isolation capabilities."
     )
-    sandbox_commands = sandbox.add_subparsers(
-        dest="sandbox_command", required=True
-    )
+    sandbox_commands = sandbox.add_subparsers(dest="sandbox_command", required=True)
     probe = sandbox_commands.add_parser(
         "probe", help="Run disposable isolation checks."
     )
@@ -565,7 +739,9 @@ def run_agent(args: argparse.Namespace) -> int:
 
     auto_approve = args.yolo or args.yes
     if not auto_approve and not sys.stdin.isatty():
-        raise RuntimeError("Confirmation mode needs an interactive terminal. Re-run with --yes for unattended use.")
+        raise RuntimeError(
+            "Confirmation mode needs an interactive terminal. Re-run with --yes for unattended use."
+        )
 
     resume_data = load_trajectory(args.resume) if args.resume else None
     if resume_data is None and not (args.task or "").strip():
@@ -575,7 +751,9 @@ def run_agent(args: argparse.Namespace) -> int:
     if not cwd.is_dir():
         raise FileNotFoundError(f"cwd is not a directory: {cwd}")
     if resume_data is None and not args.allow_dirty and _git_dirty(cwd):
-        raise RuntimeError(f"git worktree is dirty: {cwd}. Commit/stash changes or re-run with --allow-dirty.")
+        raise RuntimeError(
+            f"git worktree is dirty: {cwd}. Commit/stash changes or re-run with --allow-dirty."
+        )
     _load_runtime_env(args.env_file)
 
     executor = _load_bash_executor()(
@@ -626,14 +804,18 @@ def chat_command(args: argparse.Namespace) -> int:
     if not sys.stdin.isatty():
         raise RuntimeError("Chat mode needs an interactive terminal.")
     if args.model == "mock":
-        raise RuntimeError("The scripted mock model is for run/tests only; choose a real model for chat.")
+        raise RuntimeError(
+            "The scripted mock model is for run/tests only; choose a real model for chat."
+        )
     resume_data = load_trajectory(args.resume) if args.resume else None
     cwd_source = args.cwd or (resume_data or {}).get("cwd") or "."
     cwd = Path(cwd_source).resolve()
     if not cwd.is_dir():
         raise FileNotFoundError(f"cwd is not a directory: {cwd}")
     if resume_data is None and not args.allow_dirty and _git_dirty(cwd):
-        raise RuntimeError(f"git worktree is dirty: {cwd}. Commit/stash changes or re-run with --allow-dirty.")
+        raise RuntimeError(
+            f"git worktree is dirty: {cwd}. Commit/stash changes or re-run with --allow-dirty."
+        )
     _load_runtime_env(args.env_file)
 
     executor = _load_bash_executor()(
@@ -665,7 +847,9 @@ def chat_command(args: argparse.Namespace) -> int:
     print(f"mini-code-agent chat | model={args.model} | cwd={cwd}")
     if resume_data is not None:
         print(f"resumed={args.resume.expanduser().resolve()}")
-    print("mode=/ask (read-only) | use /code before allowing edits or command execution")
+    print(
+        "mode=/ask (read-only) | use /code before allowing edits or command execution"
+    )
     print("Commands: /ask, /code, /help, /clear, /exit")
     try:
         while True:
@@ -696,7 +880,9 @@ def chat_command(args: argparse.Namespace) -> int:
                 access.mode = command.removeprefix("/")
                 print(f"mode={command}")
                 if access.mode == "code" and args.yes:
-                    print("warning: --yes is active; code-mode writes and commands will not prompt")
+                    print(
+                        "warning: --yes is active; code-mode writes and commands will not prompt"
+                    )
                 if not separator or not remainder.strip():
                     continue
                 user_text = remainder.strip()
@@ -721,7 +907,9 @@ def chat_command(args: argparse.Namespace) -> int:
             )
             if turn.status == "submitted" and access.mode == "code":
                 access.mode = "ask"
-                print("mode=/ask (coding turn submitted; use /code for another coding task)")
+                print(
+                    "mode=/ask (coding turn submitted; use /code for another coding task)"
+                )
     except (EOFError, KeyboardInterrupt):
         print()
     finally:
@@ -754,6 +942,8 @@ def main() -> None:
             from mini_code_agent.transaction_cli import state_command
 
             raise SystemExit(state_command(args))
+        if args.command == "memory":
+            raise SystemExit(memory_command(args))
         if args.command == "chat":
             raise SystemExit(chat_command(args))
         if args.command == "trace":
@@ -772,6 +962,123 @@ def main() -> None:
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
+
+
+def memory_command(args: argparse.Namespace) -> int:
+    """Read-only phase-1 memory inspection; never initializes state."""
+
+    from mini_code_agent.memory_store import SQLiteMemoryStore
+
+    store = SQLiteMemoryStore(_state_root() / "memory", read_only=True)
+    if args.memory_command == "status":
+        status = store.status()
+        print(f"initialized: {str(status.initialized).lower()}")
+        print(f"database: {status.database_path}")
+        if status.initialized:
+            print(f"schema_version: {status.schema_version}")
+            print(f"fts_enabled: {str(status.fts_enabled).lower()}")
+            print(f"cards: {status.cards}")
+            print(f"sources: {status.sources}")
+            print(f"edges: {status.edges}")
+            for name, count in status.status_counts:
+                print(f"status.{name}: {count}")
+        return 0
+    if args.memory_command == "search":
+        results = store.search(
+            args.query,
+            limit=args.limit,
+            include_inactive=args.all_statuses,
+        )
+        if not results:
+            print("no matching memories")
+        for result in results:
+            print(
+                f"{result.id}\t{result.status}\t{result.kind}\t"
+                f"{result.authority}\t{result.abstraction}"
+            )
+        return 0
+    if args.memory_command == "show":
+        card = store.get_card(args.memory_id)
+        print(
+            json.dumps(
+                {
+                    "id": card.id,
+                    "kind": card.kind,
+                    "subtype": card.subtype,
+                    "scope": card.scope,
+                    "scope_key": card.scope_key,
+                    "value": card.value,
+                    "abstraction": card.abstraction,
+                    "cue_anchors": list(card.cue_anchors),
+                    "origin": card.origin,
+                    "authority": card.authority,
+                    "confidence": card.confidence,
+                    "importance": card.importance,
+                    "valid_from": card.valid_from,
+                    "valid_to": card.valid_to,
+                    "recorded_at_ns": card.recorded_at_ns,
+                    "content_sha256": card.content_sha256,
+                    "status": card.status,
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if args.memory_command == "sources":
+        sources = store.sources(args.memory_id)
+        print(
+            json.dumps(
+                [
+                    {
+                        "id": source.id,
+                        "card_id": source.card_id,
+                        "source_type": source.source_type,
+                        "source_ref": source.source_ref,
+                        "source_sha256": source.source_sha256,
+                        "origin": source.origin,
+                        "recorded_at_ns": source.recorded_at_ns,
+                    }
+                    for source in sources
+                ],
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if args.memory_command == "health":
+        health = store.health()
+        print(
+            json.dumps(
+                {
+                    "as_of": health.as_of,
+                    "verification_ok": health.verification_ok,
+                    "cards": health.cards,
+                    "active_cards": health.active_cards,
+                    "inactive_cards": health.inactive_cards,
+                    "expired_active_cards": health.expired_active_cards,
+                    "future_active_cards": health.future_active_cards,
+                    "scopes": health.scopes,
+                    "database_bytes": health.database_bytes,
+                    "verification_errors": list(health.verification_errors),
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0 if health.verification_ok else 1
+    verification = store.verify()
+    print(f"ok: {str(verification.ok).lower()}")
+    print(f"checked.cards: {verification.checked_cards}")
+    print(f"checked.sources: {verification.checked_sources}")
+    print(f"checked.edges: {verification.checked_edges}")
+    print(f"checked.events: {verification.checked_events}")
+    for error in verification.errors:
+        print(f"error: {error}")
+    return 0 if verification.ok else 1
 
 
 def trace_command(args: argparse.Namespace) -> int:
@@ -890,7 +1197,9 @@ def _create_demo_workspace() -> Path:
         except ValueError:
             return root
         shutil.rmtree(root, ignore_errors=True)
-    raise RuntimeError("could not create a demo workspace outside the current directory")
+    raise RuntimeError(
+        "could not create a demo workspace outside the current directory"
+    )
 
 
 def _demo_forbidden_root() -> Path:
@@ -956,10 +1265,7 @@ def doctor_command(args: argparse.Namespace) -> int:
     for check in checks:
         counts[check.status] += 1
         print(f"[{check.status.upper()}] {check.name}: {check.detail}")
-    print(
-        "summary: "
-        f"pass={counts['pass']} warn={counts['warn']} fail={counts['fail']}"
-    )
+    print(f"summary: pass={counts['pass']} warn={counts['warn']} fail={counts['fail']}")
     return 1 if counts["fail"] else 0
 
 
@@ -1042,9 +1348,7 @@ def _git_dirty(cwd: Path) -> bool:
             timeout=5,
         )
         if status.returncode != 0:
-            raise RuntimeError(
-                f"git status failed with exit code {status.returncode}"
-            )
+            raise RuntimeError(f"git status failed with exit code {status.returncode}")
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"could not safely inspect git worktree: {exc}") from exc
     return bool(status.stdout.strip())
@@ -1058,7 +1362,11 @@ def _print_workspace_changes(changes: dict) -> None:
         print("workspace_changes: none")
         return
     print("workspace_changes:")
-    for label, paths in [("created", created), ("modified", modified), ("deleted", deleted)]:
+    for label, paths in [
+        ("created", created),
+        ("modified", modified),
+        ("deleted", deleted),
+    ]:
         if paths:
             print(f"  {label}:")
             for path in paths:

@@ -94,11 +94,79 @@ def test_parser_accepts_transaction_run_and_resume():
     assert resume.transaction_id == "0" * 24
 
 
+def test_transaction_memory_is_explicitly_opt_in():
+    disabled = cli_module.build_parser().parse_args(
+        ["tx", "run", "fix it", "--model", "deepseek"]
+    )
+    enabled = cli_module.build_parser().parse_args(
+        [
+            "tx",
+            "run",
+            "fix it",
+            "--model",
+            "deepseek",
+            "--memory",
+            "local",
+        ]
+    )
+
+    assert disabled.memory is None
+    assert enabled.memory == "local"
+
+
+def test_transaction_embedding_backend_is_explicitly_configured():
+    args = cli_module.build_parser().parse_args(
+        [
+            "tx",
+            "run",
+            "fix it",
+            "--model",
+            "deepseek",
+            "--memory",
+            "local",
+            "--embedding-base-url",
+            "http://127.0.0.1:9999/v1",
+            "--embedding-model",
+            "local-embed",
+        ]
+    )
+
+    assert args.embedding_base_url == "http://127.0.0.1:9999/v1"
+    assert args.embedding_model == "local-embed"
+    assert args.embedding_api_key_env == "MCA_EMBEDDING_API_KEY"
+
+
 def test_parser_accepts_transaction_demo():
     args = cli_module.build_parser().parse_args(["tx", "demo"])
 
     assert args.command == "tx"
     assert args.transaction_command == "demo"
+
+
+@pytest.mark.parametrize("command", ["status", "verify", "health"])
+def test_parser_accepts_memory_state_commands(command: str):
+    args = cli_module.build_parser().parse_args(["memory", command])
+
+    assert args.command == "memory"
+    assert args.memory_command == command
+
+
+def test_memory_parser_does_not_import_memory_or_agent_runtime():
+    modules = _imported_modules(
+        "import sys\n"
+        "import mini_code_agent.cli as cli\n"
+        "cli.build_parser().parse_args(['memory', 'status'])\n"
+        "print(','.join(sorted(sys.modules)))"
+    )
+
+    assert modules.isdisjoint(
+        HEAVY_MODULES
+        | {
+            "mini_code_agent.agent",
+            "mini_code_agent.chat",
+            "mini_code_agent.memory_store",
+        }
+    )
 
 
 def test_transaction_demo_proves_commit_and_conflict_paths(
@@ -126,9 +194,7 @@ def test_transaction_demo_proves_commit_and_conflict_paths(
 
 def test_parser_rejects_none_for_sandbox_probe():
     with pytest.raises(SystemExit):
-        cli_module.build_parser().parse_args(
-            ["sandbox", "probe", "--sandbox", "none"]
-        )
+        cli_module.build_parser().parse_args(["sandbox", "probe", "--sandbox", "none"])
 
 
 def test_sandbox_probe_command_renders_checks_and_failure_exit(
@@ -205,9 +271,7 @@ def test_parser_accepts_named_checks_and_preserves_order():
         ]
     )
 
-    combined, explicit = cli_module._configured_verification_checks(
-        args, required=True
-    )
+    combined, explicit = cli_module._configured_verification_checks(args, required=True)
 
     assert [(item.name, item.command) for item in combined] == [
         ("tests", "pytest -q"),
@@ -263,9 +327,7 @@ def test_cli_combines_legacy_test_first_and_rejects_duplicate_tests():
             "ruff check .",
         ]
     )
-    combined, explicit = cli_module._configured_verification_checks(
-        args, required=True
-    )
+    combined, explicit = cli_module._configured_verification_checks(args, required=True)
     assert [item.name for item in combined] == ["tests", "lint"]
     assert [item.name for item in explicit] == ["lint"]
 
@@ -364,7 +426,7 @@ def test_cli_reports_package_version_without_a_subcommand():
     )
 
     assert result.returncode == 0
-    assert result.stdout.strip() == "mca 0.4.0"
+    assert result.stdout.strip() == "mca 0.5.0"
     assert result.stderr == ""
 
 
@@ -374,7 +436,9 @@ def test_demo_fixes_a_temporary_fixture_without_dirtying_the_tracked_example(
     capsys: pytest.CaptureFixture[str],
 ):
     demo_root = tmp_path / "mca-demo"
-    tracked_example = Path(__file__).parents[1] / "examples" / "calculator_bug" / "calculator.py"
+    tracked_example = (
+        Path(__file__).parents[1] / "examples" / "calculator_bug" / "calculator.py"
+    )
     tracked_before = tracked_example.read_text(encoding="utf-8")
     monkeypatch.setattr(cli_module, "_create_demo_workspace", lambda: demo_root)
 

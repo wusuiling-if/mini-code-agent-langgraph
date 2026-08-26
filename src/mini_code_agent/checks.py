@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Sequence
 
 from mini_code_agent.utils import DEFAULT_OUTPUT_LIMIT, truncate_text
-
 
 MAX_VERIFICATION_CHECKS = 16
 _CHECK_NAME = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
@@ -33,8 +33,11 @@ class VerificationCheckEvidence:
     exception_info: str = ""
     blocked: bool = False
     approved: bool = True
+    command_sha256: str = ""
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(
+        self, *, include_command_fingerprint: bool = False
+    ) -> dict[str, object]:
         data: dict[str, object] = {
             "name": self.name,
             "returncode": self.returncode,
@@ -46,7 +49,15 @@ class VerificationCheckEvidence:
             data["tests_run"] = self.tests_run
         if self.exception_info:
             data["exception_info"] = self.exception_info
+        if include_command_fingerprint and self.command_sha256:
+            data["command_sha256"] = self.command_sha256
         return data
+
+
+def verification_command_sha256(command: str) -> str:
+    """Fingerprint a configured command without persisting its plaintext."""
+
+    return hashlib.sha256(command.strip().encode("utf-8")).hexdigest()
 
 
 def normalize_verification_checks(

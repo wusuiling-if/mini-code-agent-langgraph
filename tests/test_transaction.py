@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -9,12 +10,89 @@ from typing import Any
 import pytest
 
 import mini_code_agent.transaction as transaction_module
+from mini_code_agent import cli as cli_module
+from mini_code_agent import transaction_cli
 from mini_code_agent.contracts import ToolResult
+from mini_code_agent.memory_adapters.project import GitProjectIdentityProvider
 from mini_code_agent.receipt import ReceiptError
 from mini_code_agent.transaction import TransactionError, TransactionStore
 from mini_code_agent.transaction_adapter import TransactionExecutor
+from mini_code_agent.transaction_cli import _next_resume_max_steps
 from mini_code_agent.utils import command_from_argv
 from mini_code_agent.workspace import WorkspaceSnapshot
+
+
+def test_generated_resume_step_limit_can_advance_past_checkpoint():
+    assert _next_resume_max_steps(2, {"steps": 2}) == 12
+    assert _next_resume_max_steps(50, {"steps": 50}) == 100
+    assert _next_resume_max_steps(50, {"steps": 12}) == 50
+
+
+def test_open_transaction_persists_transaction_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = _repository(tmp_path)
+    state_root = tmp_path / "state"
+
+    class FakeExecutor:
+        def __init__(self, cwd: Path, **_kwargs: Any):
+            self.cwd = Path(cwd)
+            self.redactor = object()
+
+    class StepLimitedAgent:
+        def __init__(self, _model: Any, _executor: Any, **_kwargs: Any):
+            pass
+
+        def run(self, _task: str, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "steps": 1,
+                "exit_status": "StepLimitExceeded",
+                "resumable": True,
+                "workspace_changes": {
+                    "created": [],
+                    "modified": [],
+                    "deleted": [],
+                },
+            }
+
+    monkeypatch.setenv("MCA_STATE_DIR", str(state_root))
+    monkeypatch.setattr(cli_module, "_load_runtime_env", lambda _path: None)
+    monkeypatch.setattr(cli_module, "_load_bash_executor", lambda: FakeExecutor)
+    monkeypatch.setattr(
+        cli_module, "_load_mini_code_agent", lambda: StepLimitedAgent
+    )
+    monkeypatch.setattr(cli_module, "_model_from_args", lambda _args: object())
+    monkeypatch.setattr(
+        cli_module, "_require_working_sandbox", lambda _executor: None
+    )
+    args = cli_module.build_parser().parse_args(
+        [
+            "tx",
+            "run",
+            "inspect",
+            "--cwd",
+            str(source),
+            "--model",
+            "deepseek",
+            "--test-command",
+            "true",
+            "--sandbox",
+            "none",
+            "--yes",
+        ]
+    )
+
+    assert transaction_cli.agent_command(args, resume=False) == 2
+    transaction_id = next(
+        path.name for path in (state_root / "transactions").iterdir()
+        if path.is_dir()
+    )
+    trajectory = json.loads(
+        TransactionStore(state_root)
+        .trajectory(transaction_id)
+        .read_text(encoding="utf-8")
+    )
+    assert trajectory["memory"] == {"mode": "off", "retrieval": None}
 
 
 def _git(root: Path, *args: str) -> str:
@@ -23,8 +101,7 @@ def _git(root: Path, *args: str) -> str:
         cwd=root,
         check=True,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
     return result.stdout.strip()
 
@@ -83,6 +160,8 @@ def test_transaction_isolates_then_commits_exact_prepared_state(tmp_path: Path):
     receipt = store.receipt(manifest["id"])
     assert receipt["receipt_id"] == prepared["receipt_id"]
     assert receipt["payload"]["prepared"]["patch_sha256"]
+    assert len(receipt["payload"]["workspace"]["identity_sha256"]) == 64
+    assert receipt["payload"]["memory"]["mode"] == "off"
     assert receipt["payload"]["verification"]["checks"][0]["name"] == "tests"
     committed = store.commit(manifest["id"])
 
@@ -91,6 +170,20 @@ def test_transaction_isolates_then_commits_exact_prepared_state(tmp_path: Path):
     assert (source / "new.py").read_text(encoding="utf-8") == "NEW = True\n"
     assert (source / "ignored.txt").read_text(encoding="utf-8") == "local cache\n"
     assert not workspace.exists()
+
+
+def test_local_memory_project_identity_survives_checkout_move(tmp_path: Path):
+    source = _repository(tmp_path)
+    provider = GitProjectIdentityProvider()
+
+    first = provider.identity_sha256(source, create=True)
+    moved = tmp_path / "moved-repo"
+    source.rename(moved)
+    second = provider.identity_sha256(moved, create=False)
+
+    assert first == second
+    assert len(first) == 64
+    assert first != hashlib.sha256(str(source.resolve()).encode()).hexdigest()
 
 
 def test_windows_crlf_worktree_is_clean_when_index_is_normalized(
@@ -148,6 +241,25 @@ def test_commit_refuses_tampered_prepared_patch_before_writing_source(tmp_path: 
     store.abort(manifest["id"])
 
 
+def test_validated_patch_is_bound_to_receipt_and_rejects_tampering(tmp_path: Path):
+    source = _repository(tmp_path)
+    store = TransactionStore(tmp_path / "state")
+    manifest = store.create(source, task="change value")
+    workspace = store.workspace(manifest["id"])
+    (workspace / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    prepared = store.prepare(manifest["id"], _verified(workspace))
+
+    patch = store.validated_patch(prepared["id"])
+    assert b"-VALUE = 1" in patch
+    assert b"+VALUE = 2" in patch
+
+    patch_path = store.root / prepared["id"] / "prepared.patch"
+    patch_path.write_bytes(patch + b"\n")
+    with pytest.raises(TransactionError, match="authenticated state"):
+        store.validated_patch(prepared["id"])
+    store.abort(prepared["id"])
+
+
 def test_receipt_authentication_rejects_tampering(tmp_path: Path):
     source = _repository(tmp_path)
     store = TransactionStore(tmp_path / "state")
@@ -187,9 +299,7 @@ def test_receipt_cli_verifies_and_renders_evidence(
     monkeypatch.setenv("MCA_STATE_DIR", str(state))
 
     result = transaction_cli.state_command(
-        cli_module.build_parser().parse_args(
-            ["tx", "receipt", prepared["id"]]
-        )
+        cli_module.build_parser().parse_args(["tx", "receipt", prepared["id"]])
     )
 
     output = capsys.readouterr().out
@@ -249,6 +359,15 @@ def test_transaction_state_must_be_outside_source_workspace(tmp_path: Path):
     assert not (source / ".mca-state").exists()
 
 
+def test_dirty_source_error_suggests_the_diagnostic_command(tmp_path: Path):
+    source = _repository(tmp_path)
+    store = TransactionStore(tmp_path / "state")
+    (source / "untracked.txt").write_text("local artifact\n", encoding="utf-8")
+
+    with pytest.raises(TransactionError, match="git status --short"):
+        store.create(source, task="change value")
+
+
 class _Redactor:
     def redact_text(self, text: str) -> str:
         return text
@@ -268,7 +387,9 @@ class _Executor:
             output="ok",
             returncode=0,
             duration_ms=1,
-            file_path=str(self.cwd / str(args.get("path", ""))) if args.get("path") else "",
+            file_path=str(self.cwd / str(args.get("path", "")))
+            if args.get("path")
+            else "",
         )
 
     def workspace_fingerprint(self, *, ignore_paths=None):
@@ -282,7 +403,9 @@ def test_executor_persists_read_write_sets_and_started_completion_wal(tmp_path: 
     source = _repository(tmp_path)
     store = TransactionStore(tmp_path / "state")
     manifest = store.create(source, task="record access")
-    executor = TransactionExecutor(_Executor(store.workspace(manifest["id"])), store, manifest)
+    executor = TransactionExecutor(
+        _Executor(store.workspace(manifest["id"])), store, manifest
+    )
 
     executor.execute_tool("read_file", {"path": "app.py"})
     executor.execute_tool("write_file", {"path": "app.py", "content": "x"})
@@ -342,9 +465,7 @@ def test_mock_agent_prepares_and_commits_through_transaction_runtime(tmp_path: P
     )
 
     trajectory = agent.run(manifest["task"])
-    assert trajectory["exit_status"] == "Submitted", json.dumps(
-        trajectory, indent=2
-    )
+    assert trajectory["exit_status"] == "Submitted", json.dumps(trajectory, indent=2)
     assert "return a - b" in (source / "calculator.py").read_text(encoding="utf-8")
     assert store.prepare(manifest["id"], trajectory)["status"] == "prepared"
     assert store.commit(manifest["id"])["status"] == "committed"

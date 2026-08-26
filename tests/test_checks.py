@@ -9,6 +9,7 @@ from mini_code_agent.checks import (
     VerificationCheckExecution,
     normalize_verification_checks,
     run_verification_matrix,
+    verification_command_sha256,
 )
 from mini_code_agent.contracts import ToolResult
 from mini_code_agent.utils import DEFAULT_OUTPUT_LIMIT
@@ -80,6 +81,21 @@ def test_tool_result_observation_contains_only_structured_check_evidence():
     assert "ruff check" not in str(observation)
     assert "verification_boundary_checked" not in str(observation)
     assert "private-fingerprint" not in str(observation)
+
+
+def test_command_fingerprint_is_available_only_for_durable_audit():
+    fingerprint = verification_command_sha256(" pytest -q ")
+    evidence = VerificationCheckEvidence(
+        name="tests",
+        returncode=0,
+        duration_ms=1,
+        command_sha256=fingerprint,
+    )
+
+    assert "command_sha256" not in evidence.to_dict()
+    assert evidence.to_dict(include_command_fingerprint=True)[
+        "command_sha256"
+    ] == verification_command_sha256("pytest -q")
 
 
 def _execution(
