@@ -1,0 +1,97 @@
+# Fixed-model Harbor comparison
+
+This integration compares two coding-agent harnesses while holding the model and
+SWE-bench task subset fixed:
+
+- baseline: Harbor's `mini-swe-agent==2.1.0` integration;
+- candidate: `MiniCodeAgentHarborAdapter` running MCA 0.5.0;
+- dataset: the 25-task pilot in `pilot-25.json`, drawn from the public 500-task
+  `swe-bench/swe-bench-verified` Harbor dataset;
+- attempts: one per task, with Harbor retries disabled.
+
+The dataset reference is pinned to its Harbor content SHA-256 rather than the mutable
+`latest` tag. The protocol is machine-readable in `protocol.json`. A run is publishable only
+after the exact model, both Harbor-resolved job configs/task locks, image digests,
+agent versions, and raw result directories have been retained. The checked-in
+protocol intentionally contains no score yet.
+
+## Why this benchmark
+
+SWE-bench Verified supplies real repository issues, containerized workspaces, and
+hidden issue-specific verification. It is useful for a same-model harness A/B.
+Because the benchmark is old and known to have contamination concerns, the result
+must not be presented as a current frontier-capability claim.
+
+## MCA arm boundary
+
+Each task runs as an MCA Git transaction. Memory is disabled. The pilot explicitly
+enables MCA's shell so both harnesses can inspect and test the repository, but that
+permission exists only inside Harbor's disposable Docker environment. `git diff
+--check` is the required agent-visible integrity check, and the prepared patch is
+committed only after that check. Harbor then runs its hidden verifier outside the
+agent phase. MCA uses `--sandbox none` *inside* the task because Harbor's container is
+the enclosing sandbox; this does not run task code directly on the benchmark host.
+
+The adapter records aggregate model usage from MCA's private transaction trajectory.
+The trajectory itself remains in the Harbor job directory for audit and may contain
+the private task prompt, so do not publish it without reviewing/redacting it.
+
+## Install and dry-run
+
+Harbor 0.22 requires Python 3.12+. Docker execution is best run on an x86-64 host or
+cloud sandbox because SWE-bench images are not a reliable local ARM/macOS workload.
+
+```bash
+python3.12 -m venv .harbor-venv
+. .harbor-venv/bin/activate
+python -m pip install -r benchmarks/harbor/requirements.txt
+
+python -m benchmarks.harbor.launch \
+  --model openai/gpt-5.6-sol
+```
+
+The protocol pins `openai/gpt-5.6-sol` at
+`https://api.dstopology.com/v1`; a different model is rejected so the two arms cannot
+silently drift. The launcher prints both commands without spending money. Keep the
+key outside the repository and export it before execution. The launcher maps the
+credential and pinned endpoint into both Harbor agent conventions without printing
+the secret:
+
+```bash
+export OPENAI_API_KEY='...'
+```
+
+Run one paid task through both arms first:
+
+```bash
+python -m benchmarks.harbor.launch \
+  --model openai/gpt-5.6-sol \
+  --smoke \
+  --n-concurrent 1 \
+  --package-spec IMMUTABLE_WHEEL_OR_VCS_SPEC \
+  --execute
+```
+
+After that smoke has no adapter, image, provider, or verifier error, launch both
+25-task arms explicitly:
+
+```bash
+python -m benchmarks.harbor.launch \
+  --model openai/gpt-5.6-sol \
+  --n-concurrent 4 \
+  --package-spec IMMUTABLE_WHEEL_OR_VCS_SPEC \
+  --execute
+```
+
+Before MCA 0.5.0 is on PyPI, pass an immutable wheel URL or VCS commit through
+`--package-spec`. Paid execution requires this argument explicitly, including after
+release, so the candidate artifact is always visible in the command record. Do not use
+a mutable branch reference in a report.
+
+## Reporting checklist
+
+Report paired task outcomes and resolved rate, but separate infrastructure errors
+from genuine reward-zero attempts. Include input/output/cache tokens, model calls,
+wall time, and the exact command/protocol. Verify that both arms resolved the same 25
+task revisions before comparing scores. Run a one-task smoke on both arms before the
+pilot; expand to all 500 tasks only after the pilot has no adapter or verifier errors.
