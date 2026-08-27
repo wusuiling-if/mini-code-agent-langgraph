@@ -52,6 +52,10 @@
     "output_tokens",
     "cached_input_tokens",
     "model_calls",
+    "model_attempts",
+    "model_failures",
+    "transaction_resume_count",
+    "progressing_resume_count",
     "wall_time_seconds"
   ],
   "claims_boundary": "This is a fixed-model harness comparison, not a frontier-model or uncontaminated capability claim."

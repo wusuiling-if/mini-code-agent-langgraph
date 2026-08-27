@@ -28,6 +28,66 @@ def test_generated_resume_step_limit_can_advance_past_checkpoint():
     assert _next_resume_max_steps(50, {"steps": 12}) == 50
 
 
+def test_recovery_audit_records_progress_and_failure_evidence():
+    initial = {
+        "steps": 0,
+        "duration_ms": 180_000,
+        "current_fingerprint": "before",
+        "exit_status": "Error:OpenAIConnectionError",
+        "verification_status": "required",
+        "resumable": True,
+        "events": [
+            {
+                "type": "error",
+                "operation": "model.invoke",
+                "model_attempt": 1,
+                "duration_ms": 180_000,
+                "cause_types": ["OpenAIConnectionError", "ConnectError"],
+            }
+        ],
+    }
+    initial["recovery"] = transaction_cli._recovery_audit(
+        None, initial, resumed=False
+    )
+    resumed = {
+        "steps": 4,
+        "duration_ms": 240_000,
+        "current_fingerprint": "after",
+        "exit_status": "Submitted",
+        "verification_status": "passed",
+        "resumable": False,
+        "events": initial["events"],
+    }
+
+    audit = transaction_cli._recovery_audit(initial, resumed, resumed=True)
+
+    assert audit["attempt_count"] == 2
+    assert audit["resume_count"] == 1
+    assert audit["failure_count"] == 1
+    assert audit["progressing_resume_count"] == 1
+    assert audit["consecutive_no_progress_failures"] == 0
+    assert audit["last_failure_type"] == "OpenAIConnectionError"
+    assert audit["attempts"][0]["failure_operation"] == "model.invoke"
+    assert audit["attempts"][0]["failure_cause_types"] == [
+        "OpenAIConnectionError",
+        "ConnectError",
+    ]
+    assert audit["attempts"][1] == {
+        "sequence": 2,
+        "kind": "resume",
+        "started_steps": 0,
+        "finished_steps": 4,
+        "advanced_steps": 4,
+        "workspace_changed": True,
+        "made_progress": True,
+        "duration_ms": 60_000,
+        "exit_status": "Submitted",
+        "verification_status": "passed",
+        "resumable": False,
+        "failure_type": "",
+    }
+
+
 def test_open_transaction_persists_transaction_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -93,6 +153,11 @@ def test_open_transaction_persists_transaction_metadata(
         .read_text(encoding="utf-8")
     )
     assert trajectory["memory"] == {"mode": "off", "retrieval": None}
+    assert trajectory["recovery"]["attempt_count"] == 1
+    assert trajectory["recovery"]["resume_count"] == 0
+    assert trajectory["recovery"]["attempts"][0]["exit_status"] == (
+        "StepLimitExceeded"
+    )
 
 
 def _git(root: Path, *args: str) -> str:

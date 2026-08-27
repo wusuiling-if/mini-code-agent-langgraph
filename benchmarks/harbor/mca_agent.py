@@ -120,6 +120,9 @@ class MiniCodeAgentHarborAdapter(BaseInstalledAgent):
         except (FileNotFoundError, OSError, UnicodeError, ValueError):
             return
         usage = usage_from_trajectory(trajectory)
+        recovery = trajectory.get("recovery") or {}
+        if not isinstance(recovery, dict):
+            recovery = {}
         context.n_input_tokens = usage["input_tokens"]
         context.n_output_tokens = usage["output_tokens"]
         context.n_cache_tokens = usage["cached_input_tokens"]
@@ -128,6 +131,8 @@ class MiniCodeAgentHarborAdapter(BaseInstalledAgent):
             "mca_result": {
                 "steps": int(trajectory.get("steps", 0)),
                 "model_calls": usage["model_calls"],
+                "model_attempts": usage["model_attempts"],
+                "model_failures": usage["model_failures"],
                 "reasoning_tokens": usage["reasoning_tokens"],
                 "exit_status": str(trajectory.get("exit_status", "unknown")),
                 "verification_status": str(
@@ -135,6 +140,11 @@ class MiniCodeAgentHarborAdapter(BaseInstalledAgent):
                 ),
                 "transaction_status": (
                     str(manifest.get("status", "unknown")) if manifest else "unknown"
+                ),
+                "recovery_attempts": int(recovery.get("attempt_count", 0)),
+                "resume_count": int(recovery.get("resume_count", 0)),
+                "last_failure_type": str(
+                    recovery.get("last_failure_type", "")
                 ),
             },
         }

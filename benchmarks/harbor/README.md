@@ -64,6 +64,12 @@ The candidate permits up to three explicit transaction resumes after an interrup
 checkpoint, with 10/20/30-second backoff. Request retries remain disabled; the resumed
 transaction retains cumulative steps and token usage and must run fresh verification
 before it can commit.
+Each transaction attempt now appends a structured, content-free recovery record and
+the shell log marks the attempt number, fixed backoff, exit status, and duration. Model
+usage distinguishes successful calls from all attempted and failed requests, so a
+transport failure is no longer hidden from usage totals. Repeated failures before a
+new model response do not duplicate the resume notice. These diagnostics do not change
+the pinned three-resume budget or enable request retries.
 The protocol also pins Docker execution to `linux/amd64` and lowers `uv` download
 concurrency for both agent setup and verifier parsing. These transport settings are
 recorded in each Harbor lock and do not change the selected packages or test logic.

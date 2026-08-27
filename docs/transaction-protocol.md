@@ -43,4 +43,13 @@ Resume always invalidates earlier verification and requires the configured check
 to pass again. Transaction-only memory retrieval audit metadata is carried forward
 without re-retrieving or duplicating advisory context.
 
+Every completed run or resume also appends a content-free `recovery` audit to the
+private trajectory. It records attempt duration, starting and finishing steps,
+whether the workspace fingerprint advanced, the redacted failure class/cause chain,
+and the resulting verification state. Failed provider requests are counted separately
+from successful model responses. If a connection fails before producing any new
+message, the next resume reuses the existing recovery notice instead of appending a
+duplicate. These records improve diagnosis; they do not auto-commit, preserve stale
+verification, or turn an interrupted run into a success.
+
 Transaction metadata, checkpoints, patches, receipts, access logs, and isolated worktrees live under private application state outside the source repository.

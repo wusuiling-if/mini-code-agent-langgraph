@@ -186,11 +186,20 @@ def build_transaction_command(
         "resume_count=0\n"
         f'while [ "$run_status" -ne 0 ] && [ "$resume_count" -lt {config.resume_attempts} ]; do\n'
         "  resume_count=$((resume_count + 1))\n"
-        f'  sleep "$((resume_count * {config.resume_backoff_seconds}))"\n'
+        f'  resume_backoff=$((resume_count * {config.resume_backoff_seconds}))\n'
+        "  printf 'recovery: attempt=%s backoff_seconds=%s\\n' "
+        '"$resume_count" "$resume_backoff" | tee -a '
+        f"{log_path}\n"
+        '  sleep "$resume_backoff"\n'
+        "  resume_started=$(date +%s)\n"
         "  set +e\n"
         f"  {resume_command} 2>&1 | tee -a {log_path}\n"
         "  run_status=${PIPESTATUS[0]}\n"
         "  set -e\n"
+        "  resume_finished=$(date +%s)\n"
+        "  printf 'recovery: attempt=%s status=%s duration_seconds=%s\\n' "
+        '"$resume_count" "$run_status" "$((resume_finished - resume_started))" '
+        f"| tee -a {log_path}\n"
         "done\n"
         'test "$run_status" -eq 0\n'
         f'mca tx commit "$transaction_id" 2>&1 | tee -a {log_path}\n'
@@ -206,6 +215,8 @@ def usage_from_trajectory(trajectory: dict[str, Any]) -> dict[str, int]:
         "cached_input_tokens",
         "reasoning_tokens",
         "model_calls",
+        "model_attempts",
+        "model_failures",
     )
     normalized: dict[str, int] = {}
     for key in keys:
