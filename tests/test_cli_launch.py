@@ -74,6 +74,9 @@ def test_parser_accepts_transaction_run_and_resume():
             "deepseek",
             "--test-command",
             "pytest -q",
+            "--streaming",
+            "--reasoning-effort",
+            "low",
         ]
     )
     resume = parser.parse_args(
@@ -90,6 +93,8 @@ def test_parser_accepts_transaction_run_and_resume():
 
     assert run.transaction_command == "run"
     assert run.task == "fix it"
+    assert run.streaming is True
+    assert run.reasoning_effort == "low"
     assert resume.transaction_command == "resume"
     assert resume.transaction_id == "0" * 24
 

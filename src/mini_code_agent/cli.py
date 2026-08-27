@@ -307,6 +307,21 @@ def _model_from_args(args: argparse.Namespace):
         request_timeout=args.request_timeout,
         max_retries=args.max_retries,
         deepseek_thinking=args.deepseek_thinking,
+        streaming=args.streaming,
+        reasoning_effort=args.reasoning_effort,
+    )
+
+
+def _add_model_transport_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--streaming",
+        action="store_true",
+        help="Use streaming model responses (required by some compatible gateways).",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        default=None,
+        help="Provider reasoning effort, for example low (OpenAI provider only).",
     )
 
 
@@ -323,6 +338,7 @@ def _add_transaction_runtime_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--request-timeout", type=_positive_float, default=60.0)
     parser.add_argument("--max-retries", type=_non_negative_int, default=2)
     parser.add_argument("--deepseek-thinking", action="store_true")
+    _add_model_transport_arguments(parser)
     parser.add_argument(
         "--memory",
         choices=["off", "local"],
@@ -438,6 +454,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable DeepSeek thinking mode (disabled by default for predictable tool loops).",
     )
+    _add_model_transport_arguments(run)
     run.add_argument(
         "--test-command",
         type=_non_empty_command,
@@ -601,6 +618,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable DeepSeek thinking mode; reasoning_content is preserved across tool calls.",
     )
+    _add_model_transport_arguments(chat)
     chat.add_argument(
         "--test-command",
         type=_non_empty_command,

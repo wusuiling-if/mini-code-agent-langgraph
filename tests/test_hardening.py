@@ -1134,6 +1134,30 @@ def test_deepseek_reasoning_round_trips_and_timeout_must_be_finite():
         create_model("deepseek", api_key="x", request_timeout=float("nan"))
 
 
+def test_openai_streaming_reasoning_stays_on_chat_completions():
+    model = create_model(
+        "gpt-compatible",
+        provider="openai",
+        api_key="test-key",
+        streaming=True,
+        reasoning_effort="low",
+    )
+
+    assert model.streaming is True
+    assert model.stream_usage is True
+    assert model.reasoning_effort == "low"
+    assert model.use_responses_api is False
+
+
+def test_reasoning_effort_rejects_non_openai_provider():
+    with pytest.raises(ValueError, match="OpenAI provider"):
+        create_model(
+            "deepseek",
+            api_key="test-key",
+            reasoning_effort="low",
+        )
+
+
 def test_auto_sandbox_never_silently_degrades_for_direct_api(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

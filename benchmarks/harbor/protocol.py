@@ -59,6 +59,8 @@ class HarborRunConfig:
     resume_attempts: int = 3
     resume_backoff_seconds: int = 10
     allow_shell: bool = False
+    streaming: bool = True
+    reasoning_effort: str | None = "low"
     check_name: str = "patch-integrity"
     check_command: str = "git diff --check"
     state_dir: str = "/logs/agent/state"
@@ -80,6 +82,10 @@ class HarborRunConfig:
                 raise ValueError(f"{name} must be a non-negative integer")
         if not self.check_name.strip() or not self.check_command.strip():
             raise ValueError("benchmark check name and command must not be blank")
+        if not isinstance(self.streaming, bool):
+            raise TypeError("streaming must be a boolean")
+        if self.reasoning_effort is not None and not self.reasoning_effort.strip():
+            raise ValueError("reasoning_effort must not be blank")
         for name in ("state_dir", "log_path"):
             value = getattr(self, name)
             if not value.startswith("/logs/agent/"):
@@ -128,6 +134,10 @@ def build_transaction_command(
         "--yes",
         "--quiet",
     ]
+    if config.streaming:
+        argv.append("--streaming")
+    if config.reasoning_effort is not None:
+        argv.extend(("--reasoning-effort", config.reasoning_effort))
     if base_url:
         argv.extend(("--base-url", base_url))
     if config.allow_shell:
@@ -162,6 +172,10 @@ def build_transaction_command(
         "--yes",
         "--quiet",
     ]
+    if config.streaming:
+        resume_argv.append("--streaming")
+    if config.reasoning_effort is not None:
+        resume_argv.extend(("--reasoning-effort", config.reasoning_effort))
     if base_url:
         resume_argv.extend(("--base-url", base_url))
     if config.allow_shell:

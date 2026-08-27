@@ -262,6 +262,8 @@ def create_model(
     request_timeout: float = 60.0,
     max_retries: int = 2,
     deepseek_thinking: bool = False,
+    streaming: bool = False,
+    reasoning_effort: str | None = None,
 ):
     if model_name == "mock":
         return MockCodingModel()
@@ -271,6 +273,12 @@ def create_model(
         raise ValueError("max_retries must be zero or greater")
     resolved_model = MODEL_ALIASES.get(model_name, model_name)
     resolved_provider = _resolve_provider(model_name, provider)
+    if reasoning_effort is not None:
+        reasoning_effort = reasoning_effort.strip()
+        if not reasoning_effort:
+            raise ValueError("reasoning_effort must not be blank")
+        if resolved_provider != "openai":
+            raise ValueError("reasoning_effort is supported only by the OpenAI provider")
 
     if resolved_provider == "deepseek":
         resolved_base_url = (
@@ -291,6 +299,7 @@ def create_model(
             "api_key": resolved_api_key,
             "timeout": request_timeout,
             "max_retries": max_retries,
+            "streaming": streaming,
             "extra_body": {
                 "thinking": {"type": "enabled" if deepseek_thinking else "disabled"}
             },
@@ -317,4 +326,8 @@ def create_model(
         temperature=temperature,
         timeout=request_timeout,
         max_retries=max_retries,
+        streaming=streaming,
+        stream_usage=streaming,
+        reasoning_effort=reasoning_effort,
+        use_responses_api=False,
     )

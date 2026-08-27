@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from benchmarks.harbor.preflight import run_transport_preflight
 from benchmarks.harbor.protocol import split_harbor_model
 
 HERE = Path(__file__).resolve().parent
@@ -94,6 +95,14 @@ def build_harbor_command(
             f"model {model!r} does not match pinned model {pinned_model!r}"
         )
     arm = comparison[role]
+    transport = comparison["transport"]
+    if transport.get("api") != "chat_completions":
+        raise ValueError("Harbor comparison requires the Chat Completions API")
+    if transport.get("streaming") is not True:
+        raise ValueError("Harbor comparison requires streaming=true")
+    reasoning_effort = transport.get("reasoning_effort")
+    if not isinstance(reasoning_effort, str) or not reasoning_effort.strip():
+        raise ValueError("Harbor comparison requires a reasoning_effort")
     pinned_tasks = load_task_names(protocol, protocol_path)
     selected_tasks = (
         [normalize_task_ref(name) for name in task_names]
@@ -139,12 +148,20 @@ def build_harbor_command(
         argv.extend(("--include-task-name", task_name))
     if role == "baseline":
         argv.extend(("--agent-kwarg", f"version={arm['version']}"))
+        argv.extend(("--agent-kwarg", "streaming=true"))
+        argv.extend(
+            ("--agent-kwarg", f"reasoning_effort={reasoning_effort}")
+        )
     else:
         resolved_package = package_spec or arm["package"]
         argv.extend(("--agent-kwarg", f"package_spec={resolved_package}"))
         argv.extend(("--agent-kwarg", f"max_steps={arm['max_steps']}"))
         argv.extend(("--agent-kwarg", f"context_chars={arm['context_chars']}"))
         argv.extend(("--agent-kwarg", "max_retries=0"))
+        argv.extend(("--agent-kwarg", "streaming=true"))
+        argv.extend(
+            ("--agent-kwarg", f"reasoning_effort={reasoning_effort}")
+        )
         argv.extend(("--agent-kwarg", f"resume_attempts={arm['resume_attempts']}"))
         argv.extend(
             (
@@ -230,10 +247,16 @@ def _parser() -> argparse.ArgumentParser:
         "--package-spec",
         help="Exact MCA wheel/PyPI/VCS spec; defaults to the released v0.5.0 package.",
     )
-    parser.add_argument(
+    execution = parser.add_mutually_exclusive_group()
+    execution.add_argument(
         "--execute",
         action="store_true",
         help="Run both paid benchmark arms. Without this flag, only print commands.",
+    )
+    execution.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Run only the paid transport preflight; do not launch Harbor tasks.",
     )
     return parser
 
@@ -253,6 +276,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError(
             f"model {args.model!r} does not match pinned model {pinned_model!r}"
         )
+    if args.preflight_only:
+        result = run_transport_preflight(
+            protocol,
+            build_execution_environment(protocol),
+        )
+        print("transport_preflight: " + json.dumps(result, sort_keys=True))
+        return 0
     task_names = args.task_name
     if args.smoke:
         if task_names and len(task_names) > 1:
@@ -276,6 +306,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("dry-run: add --execute to launch both paid arms")
         return 0
     execution_env = build_execution_environment(protocol)
+    preflight = run_transport_preflight(protocol, execution_env)
+    print("transport_preflight: " + json.dumps(preflight, sort_keys=True))
     for command in commands:
         subprocess.run(command, check=True, env=execution_env)
     return 0
