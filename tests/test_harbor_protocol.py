@@ -113,7 +113,7 @@ def test_usage_and_latest_transaction_are_sanitized_aggregates(tmp_path: Path) -
 
 def test_protocol_builds_paired_fixed_model_commands(tmp_path: Path) -> None:
     protocol = load_protocol()
-    assert protocol["status"] == "smoke-validated-pilot-pending"
+    assert protocol["status"] == "three-task-smoke-complete-pilot-blocked"
     assert protocol["comparison"]["model"] == "openai/gpt-5.6-sol"
     assert protocol["comparison"]["base_url"] == "https://api.dstopology.com/v1"
     assert protocol["dataset"]["ref"].endswith(
@@ -139,9 +139,10 @@ def test_protocol_builds_paired_fixed_model_commands(tmp_path: Path) -> None:
         assert command[command.index("--model") + 1] == "openai/gpt-5.6-sol"
         assert command[command.index("--n-attempts") + 1] == "1"
         assert command[command.index("--max-retries") + 1] == "0"
+        assert "BASH_ENV=/root/.local/bin/env" in command
         assert "UV_CONCURRENT_DOWNLOADS=1" in command
         assert "UV_HTTP_TIMEOUT=120" in command
-        assert command.count("--agent-env") == 2
+        assert command.count("--agent-env") == 3
         assert command.count("--verifier-env") == 2
     assert "mini-swe-agent" in baseline
     assert "version=2.1.0" in baseline

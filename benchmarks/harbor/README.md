@@ -15,6 +15,12 @@ after the exact model, both Harbor-resolved job configs/task locks, image digest
 agent versions, and raw result directories have been retained. The checked-in
 protocol intentionally contains no score yet.
 
+The deterministic three-task smoke is recorded in
+[`docs/benchmarks/harbor-three-task-smoke-2026-08-26.zh-CN.md`](../../docs/benchmarks/harbor-three-task-smoke-2026-08-26.zh-CN.md).
+It found one candidate transaction that exhausted all three connection-resume
+attempts, so the 25-task pilot is currently blocked rather than silently expanding a
+transport failure into a larger paid run.
+
 ## Why this benchmark
 
 SWE-bench Verified supplies real repository issues, containerized workspaces, and
@@ -47,6 +53,11 @@ without separately activating the virtual environment, and makes the repository'
 candidate adapter importable by the Harbor subprocess.
 The candidate installer first reuses the task image's pinned `uv==0.7.13`; its
 network installer is only a fallback, which avoids an unnecessary mutable download.
+The shared agent environment also sets `BASH_ENV=/root/.local/bin/env`. Harbor's
+upstream mini-swe-agent installer checks for `uv` before it sources that file; loading
+the task image's pinned tool environment at shell startup prevents the baseline from
+falling back to an unpinned network installer. The same environment is applied to both
+arms and does not replace the task image's existing `PATH`.
 Fetching the exact candidate package may retry up to three times to tolerate transport
 failures; each attempt uses the same immutable package specification.
 The candidate permits up to three explicit transaction resumes after an interrupted open
@@ -109,5 +120,6 @@ a mutable branch reference in a report.
 Report paired task outcomes and resolved rate, but separate infrastructure errors
 from genuine reward-zero attempts. Include input/output/cache tokens, model calls,
 wall time, and the exact command/protocol. Verify that both arms resolved the same 25
-task revisions before comparing scores. Run a one-task smoke on both arms before the
-pilot; expand to all 500 tasks only after the pilot has no adapter or verifier errors.
+task revisions before comparing scores. Complete the deterministic three-task smoke
+without agent transport errors before the pilot; expand to all 500 tasks only after
+the pilot has no adapter or verifier errors.

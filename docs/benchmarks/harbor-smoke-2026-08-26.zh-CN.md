@@ -5,6 +5,9 @@
 状态：单任务 smoke 已完成；25 任务 pilot 尚未开始。本文是工程诊断记录，不能当作公开
 leaderboard 结果。
 
+后续确定性三任务 smoke 已完成，结论和新增证据见
+[`harbor-three-task-smoke-2026-08-26.zh-CN.md`](harbor-three-task-smoke-2026-08-26.zh-CN.md)。
+
 ## 结论
 
 在同一个 SWE-bench Verified 任务、同一个 `gpt-5.6-sol` 模型和同一个 Docker
