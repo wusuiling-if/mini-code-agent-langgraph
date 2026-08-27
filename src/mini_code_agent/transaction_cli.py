@@ -25,6 +25,122 @@ def _failure_message(manifest: dict[str, Any], trajectory: dict[str, Any]) -> st
     return failure or str(trajectory.get("exit_status", "unknown"))
 
 
+def _non_negative_int(value: Any) -> int:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        else 0
+    )
+
+
+def _recovery_audit(
+    previous: dict[str, Any] | None,
+    trajectory: dict[str, Any],
+    *,
+    resumed: bool,
+) -> dict[str, Any]:
+    """Build a content-free audit of transaction attempts and recovery progress."""
+
+    previous = previous if isinstance(previous, dict) else {}
+    prior_audit = previous.get("recovery")
+    raw_attempts = (
+        prior_audit.get("attempts", []) if isinstance(prior_audit, dict) else []
+    )
+    attempts = [dict(item) for item in raw_attempts if isinstance(item, dict)]
+    started_steps = _non_negative_int(previous.get("steps")) if resumed else 0
+    finished_steps = _non_negative_int(trajectory.get("steps"))
+    started_fingerprint = (
+        str(previous.get("current_fingerprint") or "") if resumed else ""
+    )
+    finished_fingerprint = str(trajectory.get("current_fingerprint") or "")
+    prior_duration_ms = (
+        _non_negative_int(previous.get("duration_ms")) if resumed else 0
+    )
+    total_duration_ms = _non_negative_int(trajectory.get("duration_ms"))
+    exit_status = str(trajectory.get("exit_status") or "unknown")
+    raw_events = trajectory.get("events", [])
+    events = raw_events if isinstance(raw_events, list) else []
+    previous_events = previous.get("events", []) if resumed else []
+    prior_event_count = len(previous_events) if isinstance(previous_events, list) else 0
+    attempt_events = events[prior_event_count:]
+    error_events = [
+        event
+        for event in attempt_events
+        if isinstance(event, dict) and event.get("type") == "error"
+    ]
+    latest_error = error_events[-1] if error_events else {}
+    failure_type = ""
+    if exit_status.startswith(("Error:", "Interrupted:")):
+        failure_type = exit_status.split(":", 1)[1]
+    elif latest_error:
+        causes = latest_error.get("cause_types")
+        if isinstance(causes, list) and causes:
+            failure_type = str(causes[0])
+        else:
+            failure_type = "Error"
+    made_progress = finished_steps > started_steps or bool(
+        started_fingerprint
+        and finished_fingerprint
+        and started_fingerprint != finished_fingerprint
+    )
+    attempt: dict[str, Any] = {
+        "sequence": len(attempts) + 1,
+        "kind": "resume" if resumed else "initial",
+        "started_steps": started_steps,
+        "finished_steps": finished_steps,
+        "advanced_steps": max(0, finished_steps - started_steps),
+        "workspace_changed": bool(
+            started_fingerprint
+            and finished_fingerprint
+            and started_fingerprint != finished_fingerprint
+        ),
+        "made_progress": made_progress,
+        "duration_ms": max(0, total_duration_ms - prior_duration_ms),
+        "exit_status": exit_status,
+        "verification_status": str(
+            trajectory.get("verification_status") or "unknown"
+        ),
+        "resumable": bool(trajectory.get("resumable", False)),
+        "failure_type": failure_type,
+    }
+    for key in (
+        "operation",
+        "model_attempt",
+        "duration_ms",
+        "cause_types",
+        "request_id_sha256",
+    ):
+        if key in latest_error:
+            attempt[f"failure_{key}"] = latest_error[key]
+    attempts.append(attempt)
+    consecutive_no_progress_failures = 0
+    for item in reversed(attempts):
+        if not item.get("failure_type") or item.get("made_progress"):
+            break
+        consecutive_no_progress_failures += 1
+    last_failure_type = next(
+        (
+            str(item.get("failure_type"))
+            for item in reversed(attempts)
+            if item.get("failure_type")
+        ),
+        "",
+    )
+    return {
+        "schema_version": 1,
+        "attempt_count": len(attempts),
+        "resume_count": sum(item.get("kind") == "resume" for item in attempts),
+        "failure_count": sum(bool(item.get("failure_type")) for item in attempts),
+        "progressing_resume_count": sum(
+            item.get("kind") == "resume" and bool(item.get("made_progress"))
+            for item in attempts
+        ),
+        "consecutive_no_progress_failures": consecutive_no_progress_failures,
+        "last_failure_type": last_failure_type,
+        "attempts": attempts,
+    }
+
+
 def _next_resume_max_steps(
     configured_max_steps: int, trajectory: dict[str, Any]
 ) -> int:
@@ -226,6 +342,11 @@ def agent_command(args: argparse.Namespace, *, resume: bool) -> int:
                 },
             }
         )
+    trajectory["recovery"] = _recovery_audit(
+        resume_data,
+        trajectory,
+        resumed=resume,
+    )
     # MiniCodeAgent checkpoints before transaction-only metadata is attached.
     # Persist the augmented trajectory for open failures as well as prepared runs.
     write_json(output, trajectory)

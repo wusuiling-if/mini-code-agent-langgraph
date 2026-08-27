@@ -878,6 +878,66 @@ class VerifyAndSubmitModel:
         )
 
 
+class ConnectionFailureModel:
+    def bind_tools(self, tools):
+        return self
+
+    def invoke(self, messages):
+        try:
+            raise ConnectionError("provider detail")
+        except ConnectionError as exc:
+            outer = RuntimeError("connection wrapper")
+            outer.request_id = "raw-provider-request-id"
+            raise outer from exc
+
+
+def test_model_failures_are_counted_and_repeated_resume_notice_is_deduplicated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("MCA_STATE_DIR", str(tmp_path / "state"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "value.py").write_text("VALUE = 1\n", encoding="utf-8")
+    trajectory_path = tmp_path / "run.json"
+
+    first = MiniCodeAgent(
+        ConnectionFailureModel(),
+        BashExecutor(repo, approval_mode="yolo", sandbox_mode="none"),
+        trajectory_path=trajectory_path,
+        quiet=True,
+    ).run("inspect")
+    second = MiniCodeAgent(
+        ConnectionFailureModel(),
+        BashExecutor(repo, approval_mode="yolo", sandbox_mode="none"),
+        trajectory_path=trajectory_path,
+        quiet=True,
+    ).run(resume_data=first)
+    third = MiniCodeAgent(
+        ConnectionFailureModel(),
+        BashExecutor(repo, approval_mode="yolo", sandbox_mode="none"),
+        trajectory_path=trajectory_path,
+        quiet=True,
+    ).run(resume_data=second)
+
+    assert third["model_usage"]["model_calls"] == 0
+    assert third["model_usage"]["model_attempts"] == 3
+    assert third["model_usage"]["model_failures"] == 3
+    error = third["events"][-1]
+    assert error["operation"] == "model.invoke"
+    assert error["model_attempt"] == 3
+    assert error["duration_ms"] >= 0
+    assert error["cause_types"] == ["RuntimeError", "ConnectionError"]
+    assert len(error["request_id_sha256"]) == 64
+    assert "raw-provider-request-id" not in json.dumps(third)
+    resume_notices = [
+        message
+        for message in third["messages"]
+        if message.get("type") == "human"
+        and message.get("data", {}).get("content") == MiniCodeAgent.RESUME_NOTICE
+    ]
+    assert len(resume_notices) == 1
+
+
 def test_run_checkpoint_can_resume_from_last_safe_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

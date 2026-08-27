@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- Added content-free transaction recovery audits with per-attempt duration, step and workspace progress, failure class/cause types, verification state, and cumulative resume summaries. Harbor metadata now separates successful model calls from attempted and failed model requests.
+
+### Fixed
+
+- Avoided appending duplicate resume notices when a model request fails before producing a new checkpoint, keeping repeated connection recovery context bounded without weakening fresh-verification requirements.
+
 ## [0.5.0] - 2026-08-26
 
 ### Added

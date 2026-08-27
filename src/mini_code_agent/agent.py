@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import operator
 import time
@@ -79,6 +80,43 @@ def _usage_mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _exception_cause_types(exc: BaseException) -> list[str]:
+    """Return bounded exception class evidence without retaining provider text."""
+
+    names: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen and len(names) < 8:
+        seen.add(id(current))
+        name = type(current).__name__
+        if name not in names:
+            names.append(name)
+        current = current.__cause__ or current.__context__
+    return names
+
+
+def _request_id_sha256(value: Any) -> str:
+    """Hash a provider request identifier so trajectories retain no raw ID."""
+
+    candidates: list[Any] = []
+    metadata = _usage_mapping(getattr(value, "response_metadata", None))
+    for key in ("request_id", "x_request_id", "id"):
+        candidates.append(metadata.get(key))
+        candidates.append(getattr(value, key, None))
+    current = value if isinstance(value, BaseException) else None
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(seen) < 8:
+        seen.add(id(current))
+        candidates.extend(
+            (getattr(current, "request_id", None), getattr(current, "_request_id", None))
+        )
+        current = current.__cause__ or current.__context__
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return hashlib.sha256(candidate.strip().encode("utf-8")).hexdigest()
+    return ""
+
+
 def _model_usage(message: BaseMessage) -> dict[str, int]:
     """Normalize provider token metadata without retaining request content."""
 
@@ -123,6 +161,10 @@ def _model_usage(message: BaseMessage) -> dict[str, int]:
 
 class MiniCodeAgent:
     MAX_ADVISORY_CONTEXT_CHARS = 20_000
+    RESUME_NOTICE = (
+        "This run was resumed from a safe checkpoint. Treat the current "
+        "workspace as authoritative and rerun the configured tests before submit."
+    )
 
     def __init__(
         self,
@@ -147,6 +189,7 @@ class MiniCodeAgent:
         self._prior_duration_ms = 0
         self._last_gate: VerificationGate | None = None
         self._resume_state: AgentState | None = None
+        self._last_model_failure: dict[str, Any] | None = None
         self._usage = {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -154,6 +197,8 @@ class MiniCodeAgent:
             "cached_input_tokens": 0,
             "reasoning_tokens": 0,
             "model_calls": 0,
+            "model_attempts": 0,
+            "model_failures": 0,
         }
         self.graph = self._build_graph()
 
@@ -168,6 +213,7 @@ class MiniCodeAgent:
         self._event_log = []
         self._usage = {key: 0 for key in self._usage}
         self._prior_duration_ms = 0
+        self._last_model_failure = None
         started = time.time()
         self._started = started
         before_snapshot = self.executor.workspace_fingerprint(
@@ -234,6 +280,8 @@ class MiniCodeAgent:
                 "step": self._model_step_count(),
                 "error": error_text,
             }
+            if self._last_model_failure:
+                error_event.update(self._last_model_failure)
             self._event_log.append(error_event)
             safe_state = self._resume_state or initial_state
             final_state = {
@@ -328,13 +376,30 @@ class MiniCodeAgent:
                 "submission": "",
                 "events": [{"type": "limit", "reason": "step_limit", "step": state["steps"]}],
             }
-        response = self.model.invoke(
-            compact_messages(
-                state["messages"],
-                max_chars=self.context_char_budget,
-                preserve_first_human=True,
+        self._usage["model_attempts"] += 1
+        model_attempt = self._usage["model_attempts"]
+        started = time.monotonic()
+        try:
+            response = self.model.invoke(
+                compact_messages(
+                    state["messages"],
+                    max_chars=self.context_char_budget,
+                    preserve_first_human=True,
+                )
             )
-        )
+        except Exception as exc:
+            self._usage["model_failures"] += 1
+            self._last_model_failure = {
+                "operation": "model.invoke",
+                "model_attempt": model_attempt,
+                "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
+                "cause_types": _exception_cause_types(exc),
+            }
+            request_id_sha256 = _request_id_sha256(exc)
+            if request_id_sha256:
+                self._last_model_failure["request_id_sha256"] = request_id_sha256
+            raise
+        self._last_model_failure = None
         for key, value in _model_usage(response).items():
             self._usage[key] += value
         self._usage["model_calls"] += 1
@@ -344,6 +409,7 @@ class MiniCodeAgent:
         event = {
             "type": "model",
             "step": step,
+            "model_attempt": model_attempt,
             "content": truncate_text(
                 self.executor.redactor.redact_text(str(response.content))
             ),
@@ -351,6 +417,9 @@ class MiniCodeAgent:
                 self._serializable_tool_calls(getattr(response, "tool_calls", []))
             ),
         }
+        request_id_sha256 = _request_id_sha256(response)
+        if request_id_sha256:
+            event["request_id_sha256"] = request_id_sha256
         self._event_log.append(event)
         return {
             "messages": [response],
@@ -537,14 +606,12 @@ class MiniCodeAgent:
             and getattr(restored_messages[-1], "tool_calls", [])
         ):
             raise ValueError("resume checkpoint ends with unexecuted tool calls")
-        restored_messages.append(
-            HumanMessage(
-                content=(
-                    "This run was resumed from a safe checkpoint. Treat the current "
-                    "workspace as authoritative and rerun the configured tests before submit."
-                )
-            )
-        )
+        if not (
+            restored_messages
+            and restored_messages[-1].type == "human"
+            and str(restored_messages[-1].content) == self.RESUME_NOTICE
+        ):
+            restored_messages.append(HumanMessage(content=self.RESUME_NOTICE))
 
         self._task = saved_task
         self._event_log = list(data.get("events", []))

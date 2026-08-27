@@ -48,7 +48,9 @@ def test_transaction_command_keeps_memory_and_shell_disabled() -> None:
     assert '. "$HOME/.local/bin/env"' in command
     assert "--memory off" in command
     assert 'resume_count" -lt 3' in command
-    assert 'sleep "$((resume_count * 10))"' in command
+    assert "resume_backoff=$((resume_count * 10))" in command
+    assert "recovery: attempt=%s backoff_seconds=%s" in command
+    assert "recovery: attempt=%s status=%s duration_seconds=%s" in command
     assert 'mca tx resume "$transaction_id"' in command
     assert "eval " not in command
     assert "--sandbox none" in command
@@ -108,6 +110,8 @@ def test_usage_and_latest_transaction_are_sanitized_aggregates(tmp_path: Path) -
         "cached_input_tokens": 10,
         "reasoning_tokens": 3,
         "model_calls": 4,
+        "model_attempts": 0,
+        "model_failures": 0,
     }
 
 
@@ -116,6 +120,9 @@ def test_protocol_builds_paired_fixed_model_commands(tmp_path: Path) -> None:
     assert protocol["status"] == "three-task-smoke-complete-pilot-blocked"
     assert protocol["comparison"]["model"] == "openai/gpt-5.6-sol"
     assert protocol["comparison"]["base_url"] == "https://api.dstopology.com/v1"
+    assert "model_attempts" in protocol["metrics"]
+    assert "model_failures" in protocol["metrics"]
+    assert "transaction_resume_count" in protocol["metrics"]
     assert protocol["dataset"]["ref"].endswith(
         "@sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341"
     )
