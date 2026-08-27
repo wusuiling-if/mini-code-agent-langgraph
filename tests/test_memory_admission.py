@@ -614,6 +614,9 @@ def test_transaction_run_injects_original_retrieval_pack_only_when_opted_in(
             "--test-command",
             "pytest -q",
             "--yes",
+            "--streaming",
+            "--reasoning-effort",
+            "low",
             "--sandbox",
             "none",
         ]
@@ -654,9 +657,9 @@ def test_transaction_failure_prefers_redacted_error_and_renders_resume_command()
             "run",
             "change value",
             "--model",
-            "deepseek-flash",
+            "gpt-5.6-sol",
             "--provider",
-            "deepseek",
+            "openai",
             "--memory",
             "local",
             "--test-command",
@@ -664,6 +667,9 @@ def test_transaction_failure_prefers_redacted_error_and_renders_resume_command()
             "--sandbox",
             "none",
             "--yes",
+            "--streaming",
+            "--reasoning-effort",
+            "low",
         ]
     )
     manifest = {
@@ -683,9 +689,11 @@ def test_transaction_failure_prefers_redacted_error_and_renders_resume_command()
     )
     command = transaction_cli._resume_command(args, "abc123", trajectory)
     assert command.startswith(
-        "mca tx resume abc123 --model deepseek-flash --provider deepseek"
+        "mca tx resume abc123 --model gpt-5.6-sol --provider openai"
     )
     assert "--memory local" in command
     assert "--test-command 'python3 -m unittest -v'" in command
     assert "--sandbox none" in command
-    assert command.endswith("--yes")
+    assert "--yes" in command
+    assert "--streaming" in command
+    assert "--reasoning-effort low" in command

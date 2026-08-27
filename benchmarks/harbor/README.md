@@ -3,7 +3,8 @@
 This integration compares two coding-agent harnesses while holding the model and
 SWE-bench task subset fixed:
 
-- baseline: Harbor's `mini-swe-agent==2.1.0` integration;
+- baseline: Harbor's `mini-swe-agent==2.1.0` loop with the audited streaming
+  Chat Completions transport shim in this directory;
 - candidate: `MiniCodeAgentHarborAdapter` running MCA 0.5.0;
 - dataset: the 25-task pilot in `pilot-25.json`, drawn from the public 500-task
   `swe-bench/swe-bench-verified` Harbor dataset;
@@ -17,9 +18,10 @@ protocol intentionally contains no score yet.
 
 The deterministic three-task smoke is recorded in
 [`docs/benchmarks/harbor-three-task-smoke-2026-08-26.zh-CN.md`](../../docs/benchmarks/harbor-three-task-smoke-2026-08-26.zh-CN.md).
-It found one candidate transaction that exhausted all three connection-resume
-attempts, so the 25-task pilot is currently blocked rather than silently expanding a
-transport failure into a larger paid run.
+It found repeated provider disconnects in both arms and one candidate transaction
+that exhausted all three connection-resume attempts. The protocol now requires
+streaming plus `reasoning_effort=low` on Chat Completions in both arms; a rerun is
+still required before the 25-task pilot can be unblocked.
 
 ## Why this benchmark
 
@@ -73,6 +75,12 @@ the pinned three-resume budget or enable request retries.
 The protocol also pins Docker execution to `linux/amd64` and lowers `uv` download
 concurrency for both agent setup and verifier parsing. These transport settings are
 recorded in each Harbor lock and do not change the selected packages or test logic.
+Before any `--execute` run starts Harbor, the launcher sends a 24,000-character
+streamed Chat Completions request with a required tool call. Missing chunks, malformed
+tool arguments, the wrong API route, or a timeout stops the run before paid tasks.
+Use `--preflight-only` to exercise this gate without launching either arm. The
+mini-swe-agent baseline shim aggregates the streamed response back into its normal
+message shape; it does not change its prompt, tools, loop, or task environment.
 
 ```bash
 python3.12 -m venv .harbor-venv
@@ -92,6 +100,14 @@ the secret:
 
 ```bash
 export OPENAI_API_KEY='...'
+```
+
+Run only the transport gate first:
+
+```bash
+python -m benchmarks.harbor.launch \
+  --model openai/gpt-5.6-sol \
+  --preflight-only
 ```
 
 Run one paid task through both arms first:

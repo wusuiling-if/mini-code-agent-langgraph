@@ -11,6 +11,23 @@ mca init
 mca doctor --cwd /path/to/repo --sandbox auto --provider auto
 ```
 
+For an OpenAI-compatible gateway that requires incremental responses, pin the
+transport explicitly:
+
+```bash
+mca tx run "Fix the failing tests" \
+  --cwd /path/to/repo \
+  --model gpt-compatible \
+  --provider openai \
+  --base-url https://gateway.example/v1 \
+  --streaming \
+  --reasoning-effort low \
+  --check tests "pytest -q"
+```
+
+This route uses Chat Completions, not the Responses API. The flags are opt-in so
+existing provider behavior does not change silently.
+
 ## One-shot and chat integrations
 
 ```bash

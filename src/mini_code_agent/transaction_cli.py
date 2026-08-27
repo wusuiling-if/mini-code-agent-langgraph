@@ -152,6 +152,25 @@ def _next_resume_max_steps(
     return max(configured_max_steps * 2, used_steps + 10)
 
 
+def _pin_model_transport(
+    manifest: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    resumed: bool,
+) -> None:
+    requested = {
+        "streaming": bool(args.streaming),
+        "reasoning_effort": args.reasoning_effort,
+    }
+    configured = manifest.get("model_transport")
+    if resumed and configured is not None and configured != requested:
+        raise RuntimeError(
+            "transaction model transport cannot change during resume; use the "
+            "streaming and reasoning-effort values from the original run"
+        )
+    manifest["model_transport"] = requested
+
+
 def _resume_command(
     args: argparse.Namespace,
     transaction_id: str,
@@ -192,6 +211,7 @@ def _resume_command(
         argv.extend(("--check", name, command))
     for enabled, flag in (
         (args.deepseek_thinking, "--deepseek-thinking"),
+        (args.streaming, "--streaming"),
         (args.allow_zero_tests, "--allow-zero-tests"),
         (args.allow_shell, "--allow-shell"),
         (args.yolo or args.yes, "--yes"),
@@ -199,6 +219,8 @@ def _resume_command(
     ):
         if enabled:
             argv.append(flag)
+    if args.reasoning_effort is not None:
+        argv.extend(("--reasoning-effort", args.reasoning_effort))
     return command_from_argv(argv)
 
 
@@ -241,6 +263,8 @@ def agent_command(args: argparse.Namespace, *, resume: bool) -> int:
         if not output.exists():
             raise RuntimeError("transaction has no trajectory checkpoint to resume")
         resume_data = load_trajectory(output)
+        _pin_model_transport(manifest, args, resumed=True)
+        store.save(manifest)
         if args.memory is not None:
             manifest["memory_mode"] = args.memory
             if args.memory == "local":
@@ -263,6 +287,8 @@ def agent_command(args: argparse.Namespace, *, resume: bool) -> int:
             task=task,
             memory_mode=args.memory or "off",
         )
+        _pin_model_transport(manifest, args, resumed=False)
+        store.save(manifest)
         output = store.trajectory(manifest["id"])
         resume_data = None
 

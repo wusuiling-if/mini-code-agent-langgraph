@@ -3,9 +3,14 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from benchmarks.harbor.baseline_transport import (
+    STREAMING_MODEL_MODULE,
+    build_streaming_model_install_command,
+)
 from benchmarks.harbor.launch import (
     build_execution_environment,
     build_harbor_command,
@@ -15,6 +20,7 @@ from benchmarks.harbor.launch import (
     resolve_harbor_executable,
     validate_package_spec,
 )
+from benchmarks.harbor.preflight import run_transport_preflight
 from benchmarks.harbor.protocol import (
     HarborRunConfig,
     build_agent_install_command,
@@ -59,6 +65,8 @@ def test_transaction_command_keeps_memory_and_shell_disabled() -> None:
     assert "/tests/test.sh" not in command
     assert 'mca tx commit "$transaction_id"' in command
     assert "https://model.invalid/v1" in command
+    assert command.count("--streaming") == 2
+    assert command.count("--reasoning-effort low") == 2
 
 
 def test_shell_is_an_explicit_benchmark_ablation() -> None:
@@ -117,7 +125,7 @@ def test_usage_and_latest_transaction_are_sanitized_aggregates(tmp_path: Path) -
 
 def test_protocol_builds_paired_fixed_model_commands(tmp_path: Path) -> None:
     protocol = load_protocol()
-    assert protocol["status"] == "three-task-smoke-complete-pilot-blocked"
+    assert protocol["status"] == "transport-hardening-ready-for-rerun"
     assert protocol["comparison"]["model"] == "openai/gpt-5.6-sol"
     assert protocol["comparison"]["base_url"] == "https://api.dstopology.com/v1"
     assert "model_attempts" in protocol["metrics"]
@@ -151,13 +159,72 @@ def test_protocol_builds_paired_fixed_model_commands(tmp_path: Path) -> None:
         assert "UV_HTTP_TIMEOUT=120" in command
         assert command.count("--agent-env") == 3
         assert command.count("--verifier-env") == 2
-    assert "mini-swe-agent" in baseline
+    assert "benchmarks.harbor.baseline_agent:StreamingMiniSweAgent" in baseline
     assert "version=2.1.0" in baseline
+    assert "streaming=true" in baseline
+    assert "reasoning_effort=low" in baseline
     assert "benchmarks.harbor.mca_agent:MiniCodeAgentHarborAdapter" in candidate
     assert "package_spec=mini-code-agent-langgraph==0.5.0" in candidate
     assert "allow_shell=true" in candidate
     assert "resume_attempts=3" in candidate
     assert "resume_backoff_seconds=10" in candidate
+    assert "streaming=true" in candidate
+    assert "reasoning_effort=low" in candidate
+
+
+def test_baseline_streaming_shim_aggregates_chat_completion_chunks() -> None:
+    command = build_streaming_model_install_command()
+
+    assert "mini-swe-agent/bin/python" in command
+    assert "mca_streaming_litellm" in command
+    assert "stream_chunk_builder" in STREAMING_MODEL_MODULE
+    assert 'options["stream"] = True' in STREAMING_MODEL_MODULE
+
+
+def test_long_context_transport_preflight_requires_streamed_tool_call() -> None:
+    observed: dict[str, object] = {}
+
+    class Completions:
+        def create(self, **kwargs):
+            observed.update(kwargs)
+            function = SimpleNamespace(name="list_files", arguments='{"path":"."}')
+            tool_call = SimpleNamespace(function=function)
+            delta = SimpleNamespace(tool_calls=[tool_call])
+            first = SimpleNamespace(usage=None, choices=[SimpleNamespace(delta=delta)])
+            usage = SimpleNamespace(prompt_tokens=6100, completion_tokens=12)
+            final = SimpleNamespace(usage=usage, choices=[])
+            return iter((first, final))
+
+    class Client:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=Completions())
+
+    def client_factory(**kwargs):
+        observed["client"] = kwargs
+        return Client()
+
+    times = iter((10.0, 10.5, 11.0))
+    result = run_transport_preflight(
+        load_protocol(),
+        {"OPENAI_API_KEY": "secret"},
+        client_factory=client_factory,
+        clock=lambda: next(times),
+    )
+
+    assert result["status"] == "passed"
+    assert result["tool"] == "list_files"
+    assert result["first_chunk_seconds"] == 0.5
+    assert result["total_seconds"] == 1.0
+    assert result["input_tokens"] == 6100
+    assert observed["stream"] is True
+    assert observed["reasoning_effort"] == "low"
+    assert observed["model"] == "gpt-5.6-sol"
+    assert observed["client"] == {
+        "api_key": "secret",
+        "base_url": "https://api.dstopology.com/v1",
+        "timeout": 60,
+        "max_retries": 0,
+    }
 
 
 def test_protocol_rejects_model_drift(tmp_path: Path) -> None:
@@ -248,6 +315,39 @@ def test_execution_environment_requires_a_provider_key() -> None:
 def test_paid_execution_requires_an_explicit_candidate_package() -> None:
     with pytest.raises(RuntimeError, match="explicit immutable --package-spec"):
         main(["--model", "openai/gpt-5.6-sol", "--smoke", "--execute"])
+
+
+def test_failed_transport_preflight_blocks_all_paid_harbor_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launched: list[object] = []
+    monkeypatch.setenv("OPENAI_API_KEY", "secret")
+
+    def fail_preflight(*_args, **_kwargs):
+        raise RuntimeError("preflight failed")
+
+    monkeypatch.setattr(
+        "benchmarks.harbor.launch.run_transport_preflight",
+        fail_preflight,
+    )
+    monkeypatch.setattr(
+        "benchmarks.harbor.launch.subprocess.run",
+        lambda *args, **_kwargs: launched.append(args),
+    )
+
+    with pytest.raises(RuntimeError, match="preflight failed"):
+        main(
+            [
+                "--model",
+                "openai/gpt-5.6-sol",
+                "--smoke",
+                "--package-spec",
+                "mini-code-agent-langgraph==0.5.0",
+                "--execute",
+            ]
+        )
+
+    assert launched == []
 
 
 @pytest.mark.parametrize(

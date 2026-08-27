@@ -42,6 +42,8 @@ above the saved checkpoint; manually written resume commands must do the same.
 Resume always invalidates earlier verification and requires the configured checks
 to pass again. Transaction-only memory retrieval audit metadata is carried forward
 without re-retrieving or duplicating advisory context.
+The transaction manifest also pins `--streaming` and `--reasoning-effort`; resume
+refuses transport drift. The generated `next:` command carries both values forward.
 
 Every completed run or resume also appends a content-free `recovery` audit to the
 private trajectory. It records attempt duration, starting and finishing steps,

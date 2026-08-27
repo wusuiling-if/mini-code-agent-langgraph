@@ -280,6 +280,21 @@ mca init
 
 使用真实 provider 前，请先在生成的文件中填入 provider key。之后 `mca run` 和 `mca chat` 会自动加载这个默认文件；只有使用其他位置时才需要传 `--env-file`。
 
+如果 OpenAI 兼容中转在非流式请求上容易断连，可显式固定传输方式：
+
+```bash
+mca tx run "修复失败测试" \
+  --cwd /path/to/repo \
+  --model gpt-compatible \
+  --provider openai \
+  --base-url https://gateway.example/v1 \
+  --streaming \
+  --reasoning-effort low \
+  --check tests "pytest -q"
+```
+
+这条路径固定使用 Chat Completions，不切换到 Responses API。两个选项默认不启用，避免静默改变其他 provider 的行为。事务 manifest 会记录它们；resume 若改掉任一值会拒绝继续，自动打印的 `next:` 命令则会完整继承。
+
 默认路径：
 
 | 平台 | 配置文件 |

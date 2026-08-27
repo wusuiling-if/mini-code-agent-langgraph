@@ -17,7 +17,7 @@ from mini_code_agent.memory_adapters.project import GitProjectIdentityProvider
 from mini_code_agent.receipt import ReceiptError
 from mini_code_agent.transaction import TransactionError, TransactionStore
 from mini_code_agent.transaction_adapter import TransactionExecutor
-from mini_code_agent.transaction_cli import _next_resume_max_steps
+from mini_code_agent.transaction_cli import _next_resume_max_steps, _pin_model_transport
 from mini_code_agent.utils import command_from_argv
 from mini_code_agent.workspace import WorkspaceSnapshot
 
@@ -26,6 +26,60 @@ def test_generated_resume_step_limit_can_advance_past_checkpoint():
     assert _next_resume_max_steps(2, {"steps": 2}) == 12
     assert _next_resume_max_steps(50, {"steps": 50}) == 100
     assert _next_resume_max_steps(50, {"steps": 12}) == 50
+
+
+def test_transaction_resume_pins_model_transport() -> None:
+    parser = cli_module.build_parser()
+    initial = parser.parse_args(
+        [
+            "tx",
+            "run",
+            "fix it",
+            "--model",
+            "gpt-compatible",
+            "--provider",
+            "openai",
+            "--streaming",
+            "--reasoning-effort",
+            "low",
+        ]
+    )
+    matching = parser.parse_args(
+        [
+            "tx",
+            "resume",
+            "0" * 24,
+            "--model",
+            "gpt-compatible",
+            "--provider",
+            "openai",
+            "--streaming",
+            "--reasoning-effort",
+            "low",
+        ]
+    )
+    drifted = parser.parse_args(
+        [
+            "tx",
+            "resume",
+            "0" * 24,
+            "--model",
+            "gpt-compatible",
+            "--provider",
+            "openai",
+        ]
+    )
+    manifest: dict[str, Any] = {}
+
+    _pin_model_transport(manifest, initial, resumed=False)
+    _pin_model_transport(manifest, matching, resumed=True)
+
+    assert manifest["model_transport"] == {
+        "streaming": True,
+        "reasoning_effort": "low",
+    }
+    with pytest.raises(RuntimeError, match="cannot change during resume"):
+        _pin_model_transport(manifest, drifted, resumed=True)
 
 
 def test_recovery_audit_records_progress_and_failure_evidence():

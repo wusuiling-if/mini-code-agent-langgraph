@@ -39,6 +39,8 @@ class MiniCodeAgentHarborAdapter(BaseInstalledAgent):
         resume_attempts: int = 3,
         resume_backoff_seconds: int = 10,
         allow_shell: bool = False,
+        streaming: bool = True,
+        reasoning_effort: str | None = "low",
         *args: Any,
         **kwargs: Any,
     ) -> None:
@@ -56,6 +58,8 @@ class MiniCodeAgentHarborAdapter(BaseInstalledAgent):
             resume_attempts=resume_attempts,
             resume_backoff_seconds=resume_backoff_seconds,
             allow_shell=allow_shell,
+            streaming=streaming,
+            reasoning_effort=reasoning_effort,
         )
 
     @staticmethod
@@ -109,6 +113,9 @@ class MiniCodeAgentHarborAdapter(BaseInstalledAgent):
                 "outer_sandbox": "harbor_environment",
                 "agent_visible_check": self._run_config.check_command,
                 "hidden_verifier_exposed": False,
+                "transport_api": "chat_completions",
+                "streaming": self._run_config.streaming,
+                "reasoning_effort": self._run_config.reasoning_effort,
             }
         }
         await self.exec_as_agent(environment, command=command, env=env)
