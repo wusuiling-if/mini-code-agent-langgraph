@@ -57,7 +57,7 @@ mca tx commit TRANSACTION_ID
 ## 显式启用的记忆基础
 
 项目现已包含一套证据约束本地记忆基础：不可变记忆卡片、
-追加式时态状态、经过认证的证据与关系、SQLite FTS 检索，以及只读的
+追加式时态状态、经过认证的证据与关系、SQLite FTS 检索，以及离线管理型
 `mca memory` 命令。默认情况下，`run`、`chat` 和 `tx` 都不会读取或写入记忆，
 因此现有行为和必需依赖保持不变。事务可显式设置 `--memory local`；成功 commit 后，
 Runtime 会确定性保存经过认证的验证流程和 receipt 绑定的真实补丁经验，但不会持久化验证
@@ -81,10 +81,16 @@ SillyTavern 聊天适配器，以及不执行代码的酒馆助手导入预览�
 或内网模型服务，因此不是必须本地部署。默认关闭；远程模式会发送硬过滤后的候选正文，本地模式
 隐私更好但需要自行运行模型。向量使用私有 SQLite 派生缓存，后端失败时自动退回原检索器。
 
-交互聊天可通过 `mca chat --memory local` 显式启用长期记忆。原始用户/助手事件写入私有、
-带来源摘要的追加日志；`/remember`、`/correct`、`/forget` 分别用于确认、修正和遗忘，
-`/memory` 可检查活跃卡片与待审批候选。启发式抽取只会暂存候选，必须执行
-`/remember @ID` 才会成为活跃记忆；召回内容始终是有限、带来源、不能授权工具的建议上下文。
+交互聊天可通过 `mca chat --memory local` 显式启用长期记忆。原始用户/助手事件写入私有 HMAC
+链式追加日志；`/remember` 默认写入当前 workspace，`/remember --scope user` 则写入可跨
+workspace 使用的稳定本地用户作用域。`/correct`、`/forget` 分别用于修正和审计式遗忘，
+`/memory` 可检查两个作用域的活跃卡片与待审批候选。启发式抽取只会暂存 user 候选，必须执行
+`/remember @ID` 才会成为活跃记忆；可选 embedding 只重排经过硬过滤的候选，失败时退回词法
+检索。召回内容始终是有限、带来源、不能授权工具的建议上下文。
+
+离线 `mca memory` 命令现可列出、修正、遗忘、批准或放弃记录；`verify` 会联合检查 SQLite、
+对话链及跨存储证据。支持校验后备份/恢复，以及不可逆的 `purge --yes`。备份是明文敏感数据，
+不是加密导出。
 
 不使用 embedding 的 120-session 长期对话诊断中，显式认证写入后的离线检索为 10/10；
 DeepSeek 读取最近窗口为 30%，完整历史和证据时态记忆均为 90%，而记忆路径平均只注入 342
@@ -105,12 +111,12 @@ DeepSeek 读取最近窗口为 30%，完整历史和证据时态记忆均为 90%
 .venv/bin/python -m evals.run_memory_intervention
 ```
 
-v0.5.0 的发布门禁用一个命令运行全部八个确定性记忆套件，不调用模型，并输出与评测源码绑定的
+v0.6.0 的发布门禁用一个命令运行全部九个确定性记忆套件，不调用模型，并输出与评测源码绑定的
 统一 JSON 报告：
 
 ```bash
 .venv/bin/python -m evals.run_memory_suite --json \
-  --output /tmp/memory-v0.5.0.json
+  --output /tmp/memory-v0.6.0.json
 ```
 
 结果感知控制、自动写入 durable 的自由对话抽取和聊天格式导入仍属于实验范围。生产承诺与明确不做的事项见

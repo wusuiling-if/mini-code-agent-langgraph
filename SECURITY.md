@@ -8,10 +8,10 @@ mini-code-agent-langgraph is a compact reference runtime for studying and extend
 
 | Version | Security fixes |
 | --- | --- |
-| `0.5.x` | Supported |
-| `0.4.x` and earlier | Not supported |
+| `0.6.x` | Supported |
+| `0.5.x` and earlier | Not supported |
 
-Security fixes are applied to the latest `0.5.x` release. Older trajectory and Undo formats may be readable for inspection, but unsafe legacy Undo data is not trusted for writes unless the user explicitly opts in.
+Security fixes are applied to the latest `0.6.x` release. Older trajectory and Undo formats may be readable for inspection, but unsafe legacy Undo data is not trusted for writes unless the user explicitly opts in.
 
 ## Reporting a vulnerability
 
@@ -47,6 +47,7 @@ Never include a real API key, access token, private repository content, or an un
 - the host from accidental, lingering, or unconstrained command execution;
 - the integrity of the verify-before-submit decision.
 - the integrity of prepared transaction evidence and source conflict checks.
+- the integrity and scoped retrieval of local long-term conversation memory.
 
 ### Trust assumptions
 
@@ -72,6 +73,8 @@ Never include a real API key, access token, private repository content, or an un
 - Resume starts from a complete tool boundary and requires fresh verification before submission. The new-run dirty-worktree gate is not a substitute for reviewing or stashing extra changes before resume.
 - Private Undo journals are stored with restrictive permissions and authenticated with HMAC over the trajectory/workspace/path/content relationship. Undo checks for post-edit conflicts before writing.
 - Transactional runs keep agent edits in a detached worktree until explicit commit. Prepare emits a private HMAC-authenticated receipt binding baseline, patch, verification, trajectory, WAL, and access-set digests; commit verifies the receipt and rejects changed source or prepared snapshots.
+- Opt-in conversation memory stores raw events and candidate decisions in private HMAC-chained ledgers. Each envelope binds the log identity, sequence, previous HMAC, and payload; verification also binds admitted cards and approvals back to authenticated event evidence.
+- Conversation recall is restricted to the stable local user scope and the current workspace scope. Recalled text is bounded advisory data and cannot grant tool, shell, write, or verification authority. Heuristics can only stage candidates until explicit approval.
 - Child commands have time and output bounds. Timeout, Ctrl-C, termination signals, and exception paths attempt to reap the POSIX process group, the Windows process tree through `taskkill`, and the Docker container created for that invocation.
 - Provider environments are narrowed and secret-like values are redacted from observations and trajectories on a best-effort basis; trajectories remain sensitive and are never considered safe to publish by default.
 
@@ -101,6 +104,7 @@ The project does **not** guarantee:
 - complete descendant-process containment on native host backends: process-group cleanup is best effort, and a double-fork can create a new session. Bubblewrap's PID namespace and Docker's container boundary provide stronger containment, but `sandbox-exec` is not a PID namespace, cgroup, or container boundary;
 - availability against denial-of-service, resource exhaustion outside configured limits, or provider outages;
 - protection after the local account, Python environment, dependency chain, local HMAC key material, or host is compromised.
+- confidentiality of the local memory database, conversation logs, or exported backups. HMAC detects modification; it does not encrypt content or hide access patterns.
 - portable or third-party trust in a transaction receipt; its HMAC authenticates local state only, and the receipt does not prove test completeness, semantic correctness, or absence of a check/apply race.
 
 Flags such as `--sandbox none`, `--allow-shell`, `--allow-dirty`, `--yes`, `--force`, and `--allow-legacy-unsafe` deliberately weaken one or more controls. Use them only in disposable, credential-free workspaces after reviewing the consequence.
@@ -112,6 +116,8 @@ Docker isolation additionally assumes the selected image is trusted. Every image
 - Prefer the private config file created by `mca init`; on POSIX systems it is expected to be a regular, user-owned `0600` file.
 - Do not place production credentials, SSH keys, signing keys, or unrelated sensitive data under `--cwd`.
 - Treat every trajectory as sensitive because it may contain source, prompts, file reads, and command output. Review and redact it, diffs, crash logs, and diagnostic output before sharing; redaction is defense in depth, not proof that every secret format was removed.
+- Treat `mca memory backup` archives as plaintext sensitive data. Store them with the same or stronger protection as the source state and delete obsolete copies separately; `mca memory purge --yes` cannot erase external backups.
+- `/forget` creates an auditable tombstone and does not physically erase historical evidence. Use `mca memory purge --yes` only when permanent deletion of the entire local store is intended; the command is irreversible without an external backup.
 - `mca doctor` checks secret-file metadata without reading that file's contents, and checks only in-process key presence without printing values; a key stored solely in the private env file is intentionally not verified by doctor. Its sandbox check is static PATH discovery, while `run` and coding-enabled `chat` perform the authoritative usability probe; `/ask`-only chat skips it.
 - Use short-lived test credentials for reproductions and rotate anything copied into a terminal transcript, issue, or chat.
 

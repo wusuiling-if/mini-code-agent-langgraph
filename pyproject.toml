@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-code-agent-langgraph"
-version = "0.5.0"
+version = "0.6.0"
 description = "A compact transactional runtime for verified coding agents."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,9 +41,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "build>=1.2,<2",
+    "mypy>=1.17,<2",
     "pytest>=8,<10",
+    "pytest-cov>=6,<8",
     "PyYAML>=6.0.2,<7",
     "ruff>=0.12,<1",
+    "twine>=6,<7",
 ]
 
 [project.scripts]
@@ -73,3 +77,19 @@ select = ["E4", "E7", "E9", "F"]
 "src/mini_code_agent/agent.py" = ["F401"]
 # Evaluation entry points deliberately amend sys.path before importing the checkout.
 "evals/*.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.10"
+check_untyped_defs = true
+ignore_missing_imports = true
+no_implicit_optional = true
+show_error_codes = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[tool.coverage.run]
+source = ["memory_core", "mini_code_agent"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true

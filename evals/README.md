@@ -7,10 +7,13 @@ provider credentials or model calls:
 
 ```bash
 .venv/bin/python -m evals.run_memory_suite --json \
-  --output /tmp/memory-v0.5.0.json
+  --output /tmp/memory-v0.6.0.json
 ```
 
-The report contains each suite's machine-readable result, an aggregate gate,
+The v0.6.0 report contains nine suites, including an eight-case production
+conversation-memory gate for user/workspace scope, corrections and forgetting,
+candidate approval, credential refusal, HMAC tampering, backup/restore, and
+cross-store evidence. It also contains each suite's machine-readable result, an aggregate gate,
 an explicit claims boundary, and a SHA-256 binding the runner sources. The
 outcome-controller and scripted agent-intervention suites remain labeled as
 experiments even though their deterministic wiring checks participate in the

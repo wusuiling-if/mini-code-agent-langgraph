@@ -38,6 +38,9 @@ Run the complete deterministic checks from macOS, Linux, or WSL2 before opening 
 ```bash
 pytest -q
 ruff check src tests evals benchmarks
+ruff format --check src/mini_code_agent/conversation_ledger.py src/mini_code_agent/conversation_memory.py src/mini_code_agent/memory_backup.py src/mini_code_agent/cli.py evals/run_conversation_memory.py evals/run_memory_suite.py tests/test_conversation_memory_runtime.py tests/test_memory_release_suite.py
+mypy src/mini_code_agent/conversation_ledger.py src/mini_code_agent/conversation_memory.py src/mini_code_agent/memory_backup.py
+pytest -q --cov=src/mini_code_agent --cov=src/memory_core --cov-fail-under=80
 python -m pip check
 python -m evals.run_evals --json
 python -m evals.run_memory_suite --json
@@ -86,9 +89,11 @@ Do not commit API keys, `.env` files, private trajectories, Undo journals, fixtu
 - Do not silently turn a failed security check into an unisolated fallback.
 - Treat trajectories as sensitive even after best-effort redaction, and keep reversible source content in the private authenticated journal.
 
-Ruff's correctness-oriented lint rules are mandatory and run in CI. There is not
-yet a mandatory formatter or type checker configuration. Avoid unrelated formatting
-churn and make the patch easy to audit.
+Ruff's correctness-oriented lint rules and the 80% repository coverage floor are
+mandatory in CI. Ruff formatting and mypy are additionally mandatory for the v0.6
+conversation-ledger, conversation-memory, and backup trust boundary listed above.
+The older runtime has not yet completed a formatter or type-check migration, so avoid
+unrelated bulk formatting and expand those gates deliberately when touching legacy code.
 
 ## Security review
 

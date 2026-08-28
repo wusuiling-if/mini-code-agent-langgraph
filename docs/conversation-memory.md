@@ -154,20 +154,26 @@ the schema mapping is reviewed and tested.
 `mca chat --memory local` implements the first production host bridge:
 
 - user and assistant turns are appended as immutable `ConversationEvent` rows in
-  the private state directory;
-- explicit `/remember` writes a same-workspace semantic card bound to that event's
-  source reference and digest;
+  private HMAC-chained ledgers; log identity, sequence, previous HMAC, and payload
+  are authenticated under a local key;
+- explicit `/remember` writes a current-workspace semantic card, while
+  `/remember --scope user` writes a stable local-user card available across workspaces;
+  both are bound to the event's source reference and digest;
 - `/correct` creates a superseding revision and `/forget` appends a tombstone plus
   the user's forget-event evidence;
-- retrieval uses the existing evidence-temporal policy and a 5,000-character,
-  four-item prompt budget;
+- retrieval searches only the stable local-user and current-workspace scopes,
+  using the existing evidence-temporal policy and a 5,000-character, four-item
+  prompt budget; an optional OpenAI-compatible semantic provider can rerank the
+  already hard-filtered candidates and falls back to lexical retrieval;
 - simple preference-like statements may become pending candidates, but only
   `/remember @ID` can admit one to durable memory.
 
 The bridge rejects obvious credentials, leaves memory off by default, and labels
 retrieval as fallible historical data that cannot grant tool authority. `/clear`
 only clears the model's current context; it deliberately does not erase durable
-memory. Use `/forget` for that.
+memory. Use `/forget` for an auditable tombstone, or `mca memory purge --yes` to
+remove the complete local store. `mca memory verify` checks both HMAC chains and
+their evidence links into SQLite. Full backups are verified but plaintext sensitive.
 
 ## Further integration boundary
 

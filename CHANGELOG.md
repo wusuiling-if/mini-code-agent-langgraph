@@ -4,9 +4,14 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-28
+
 ### Added
 
-- Added opt-in long-term conversation memory for `mca chat --memory local`, including private immutable event logs, bounded same-workspace recall, evidence-bearing `/remember`, auditable `/forget` and `/correct`, and heuristic candidates that require explicit approval before becoming durable memory.
+- Added opt-in long-term conversation memory for `mca chat --memory local`, including private immutable event logs, bounded user- and workspace-scoped recall, evidence-bearing `/remember`, auditable `/forget` and `/correct`, and heuristic candidates that require explicit approval before becoming durable memory.
+- Added HMAC-chained event and candidate ledgers, cross-store evidence verification, stable local user scope, optional semantic retrieval for chat, and automatic migration of valid legacy self-hashed conversation logs.
+- Added offline `mca memory list/forget/correct/candidates`, verified plaintext backup/restore, and an explicit `mca memory purge --yes` path for irreversible removal of the full local store and evidence.
+- Added an eight-case production conversation-memory gate covering scope isolation, temporal controls, approval, credential refusal, tampering, backup/restore, and evidence binding; the aggregate memory release gate now runs nine deterministic suites.
 - Added content-free transaction recovery audits with per-attempt duration, step and workspace progress, failure class/cause types, verification state, and cumulative resume summaries. Harbor metadata now separates successful model calls from attempted and failed model requests.
 - Added explicit `--streaming` and `--reasoning-effort` model transport controls. Transaction manifests pin both values across resume, and OpenAI-compatible runs remain on Chat Completions.
 - Added a fixed-model Harbor transport preflight that requires a long-context streamed tool call before paid execution, plus a mini-swe-agent streaming shim so both comparison arms use Chat Completions with the same reasoning effort.
@@ -19,11 +24,14 @@ All notable changes to this project are documented in this file. The format foll
 ### Changed
 
 - Added a correctness-oriented Ruff gate to contributor and release CI, and made the release workflow rerun the full test suite plus both deterministic evaluation gates before building artifacts.
-- Updated the supported-security-version and native Windows contributor guidance for the current 0.5.x runtime.
+- Added an 80% repository coverage floor plus formatter and type-check gates for the new memory trust boundary; full-repository formatter and typing adoption remain staged to avoid unrelated churn.
+- Updated the supported-security-version and native Windows contributor guidance for the current 0.6.x runtime.
 
 ### Security
 
 - Kept recalled conversation memory advisory and unable to grant tool authority, rejected obvious credentials from durable admission, and prevented heuristic extraction from silently writing active memory.
+- Bound raw conversation and candidate rows to a private local HMAC key, sequence, log identity, and previous record; `mca memory verify` now checks those chains and binds SQLite sources and candidate approvals back to authenticated events.
+- Made backups fail closed on invalid stores, unsafe archive paths, duplicate or unmanifested entries, digest mismatches, and non-private state; backups remain plaintext sensitive artifacts rather than encryption.
 - Kept private Harbor environments and raw benchmark artifacts out of the source worktree by default to reduce accidental publication of sensitive prompts, trajectories, and workspace data.
 
 ## [0.5.0] - 2026-08-26

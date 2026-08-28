@@ -12,14 +12,21 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 
 from memory_core.conversation import ConversationEvent
+from memory_core.contracts import SemanticCandidateProvider
 from memory_core.rendering import ContextBudget
 from memory_core.security import SecretDetector
+from mini_code_agent.conversation_ledger import (
+    AuthenticatedConversationLedger,
+    ConversationLedgerError,
+)
 from mini_code_agent.locking import exclusive_file_lock
 from mini_code_agent.memory_adapters.project import GitProjectIdentityProvider
 from mini_code_agent.memory_models import EvidenceSource, MemoryCard
@@ -31,10 +38,10 @@ from mini_code_agent.memory_retrieval import (
     lexical_tokens,
 )
 from mini_code_agent.memory_store import SQLiteMemoryStore
-from mini_code_agent.utils import MAX_STATE_FILE_BYTES
 
 MAX_EVENT_CONTENT_CHARS = 1_000_000
 MAX_CANDIDATE_CHARS = 2_000
+USER_IDENTITY_NAME = "user.identity"
 
 
 def _canonical_json(value: object) -> str:
@@ -49,6 +56,20 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _read_user_identity(path: Path) -> str:
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ConversationLedgerError("user identity must be a regular file")
+    if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+        raise PermissionError("user identity is not owned by this user")
+    if os.name != "nt" and stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise PermissionError("user identity permissions are too broad")
+    identity = path.read_text(encoding="ascii")
+    if not re.fullmatch(r"[0-9a-f]{64}", identity):
+        raise ConversationLedgerError("user identity is invalid")
+    return identity
+
+
 @dataclass(frozen=True)
 class ConversationMemoryCandidate:
     candidate_id: str
@@ -57,6 +78,17 @@ class ConversationMemoryCandidate:
     source_sha256: str
     source_event_id: str
     created_at: str
+    scope: str = "user"
+
+
+@dataclass(frozen=True)
+class ConversationMemoryVerification:
+    ok: bool
+    checked_logs: int
+    checked_events: int
+    checked_candidates: int
+    checked_sources: int
+    errors: tuple[str, ...] = ()
 
 
 class MemorySelectionError(ValueError):
@@ -65,6 +97,186 @@ class MemorySelectionError(ValueError):
     def __init__(self, message: str, matches: tuple[MemoryCard, ...] = ()) -> None:
         super().__init__(message)
         self.matches = matches
+
+
+def list_conversation_memories(
+    state_root: Path, workspace: Path
+) -> tuple[MemoryCard, ...]:
+    """List user/current-workspace cards without initializing or mutating state."""
+
+    state_root = Path(state_root).expanduser().resolve()
+    workspace = Path(workspace).expanduser().resolve()
+    store = SQLiteMemoryStore(state_root / "memory", read_only=True)
+    if not store.initialized:
+        return ()
+    scope_pairs: list[tuple[str, str]] = []
+    identity_path = store.directory / "conversations" / USER_IDENTITY_NAME
+    try:
+        identity = _read_user_identity(identity_path)
+    except FileNotFoundError:
+        pass
+    else:
+        user_identity = hashlib.sha256(
+            f"mca-user:{identity}".encode("ascii")
+        ).hexdigest()
+        scope_pairs.append(("user", f"sha256:{user_identity}"))
+    try:
+        workspace_identity = GitProjectIdentityProvider().identity_sha256(
+            workspace, create=False
+        )
+    except RuntimeError:
+        workspace_identity = hashlib.sha256(
+            f"mca-workspace:{workspace}".encode("utf-8")
+        ).hexdigest()
+    scope_pairs.append(("workspace", f"sha256:{workspace_identity}"))
+    return store.list_cards(scope_pairs=tuple(scope_pairs), include_global=False)
+
+
+def verify_conversation_memory(
+    memory_directory: Path,
+) -> ConversationMemoryVerification:
+    """Verify every conversation chain and bind card sources back to raw events."""
+
+    directory = Path(memory_directory).expanduser()
+    events_directory = directory / "conversations"
+    if not events_directory.exists():
+        store = SQLiteMemoryStore(directory, read_only=True)
+        if store.initialized:
+            for card in store.list_cards(include_inactive=True):
+                if any(
+                    source.source_type
+                    in {"conversation_event", "conversation_forget_event"}
+                    for source in store.sources(card.id)
+                ):
+                    return ConversationMemoryVerification(
+                        False,
+                        0,
+                        0,
+                        0,
+                        0,
+                        ("conversation evidence directory is missing",),
+                    )
+        return ConversationMemoryVerification(True, 0, 0, 0, 0)
+    errors: list[str] = []
+    checked_logs = 0
+    checked_events = 0
+    checked_candidates = 0
+    checked_sources = 0
+    event_revisions: dict[str, str] = {}
+    candidate_sources: dict[str, tuple[str, str]] = {}
+    candidate_decisions: dict[str, dict[str, object]] = {}
+    try:
+        ledger = AuthenticatedConversationLedger(events_directory, create=False)
+        if not ledger.key:
+            raise ConversationLedgerError("conversation authentication key is missing")
+        identity_path = events_directory / USER_IDENTITY_NAME
+        if any(events_directory.glob("*.jsonl")):
+            try:
+                _read_user_identity(identity_path)
+            except FileNotFoundError as exc:
+                raise ConversationLedgerError("user identity is missing") from exc
+        for path in sorted(events_directory.glob("*.jsonl")):
+            if path.name == "candidates.jsonl":
+                continue
+            checked_logs += 1
+            rows = ledger.read(path, f"events:{path.stem}")
+            for index, row in enumerate(rows):
+                LocalConversationMemory._validate_event_payload(row)
+                event = ConversationEvent(**cast(Any, row))
+                if event.conversation_id != path.stem or event.sequence != index:
+                    raise ConversationLedgerError(
+                        f"conversation event binding mismatch: {path.name}:{index}"
+                    )
+                previous = event_revisions.setdefault(
+                    event.source_ref, event.source_sha256
+                )
+                if previous != event.source_sha256:
+                    raise ConversationLedgerError(
+                        f"conversation source reference is ambiguous: {event.source_ref}"
+                    )
+                checked_events += 1
+
+        candidates_path = events_directory / "candidates.jsonl"
+        if candidates_path.exists():
+            checked_logs += 1
+            for row in ledger.read(candidates_path, "candidates"):
+                LocalConversationMemory._validate_candidate_payload(row)
+                if row.get("record_type") == "candidate":
+                    checked_candidates += 1
+                    candidate_id = str(row.get("candidate_id", ""))
+                    source_ref = str(row.get("source_ref", ""))
+                    source_sha256 = str(row.get("source_sha256", ""))
+                    if event_revisions.get(source_ref) != source_sha256:
+                        raise ConversationLedgerError(
+                            f"candidate evidence does not match an event: {source_ref}"
+                        )
+                    candidate_sources[candidate_id] = (source_ref, source_sha256)
+                else:
+                    candidate_id = str(row.get("candidate_id", ""))
+                    if candidate_id in candidate_decisions:
+                        raise ConversationLedgerError(
+                            f"candidate has multiple terminal decisions: {candidate_id}"
+                        )
+                    candidate_decisions[candidate_id] = row
+
+        store = SQLiteMemoryStore(directory, read_only=True)
+        cards_by_id: dict[str, MemoryCard] = {}
+        if store.initialized:
+            for card in store.list_cards(include_inactive=True):
+                cards_by_id[card.id] = card
+                for source in store.sources(card.id):
+                    if source.source_type not in {
+                        "conversation_event",
+                        "conversation_forget_event",
+                    }:
+                        continue
+                    checked_sources += 1
+                    if event_revisions.get(source.source_ref) != source.source_sha256:
+                        errors.append(
+                            "memory source does not match authenticated conversation "
+                            f"evidence: {card.id}:{source.source_ref}"
+                        )
+        for candidate_id, decision in candidate_decisions.items():
+            if candidate_id not in candidate_sources:
+                errors.append(f"candidate decision has no candidate: {candidate_id}")
+                continue
+            kind = str(decision.get("decision", ""))
+            if kind not in {"approved", "dismissed"}:
+                errors.append(f"candidate decision is invalid: {candidate_id}")
+                continue
+            card_id = str(decision.get("card_id", ""))
+            if kind == "dismissed":
+                if card_id:
+                    errors.append(
+                        f"dismissed candidate unexpectedly names a card: {candidate_id}"
+                    )
+                continue
+            approved_card = cards_by_id.get(card_id)
+            if approved_card is None:
+                errors.append(
+                    f"approved candidate card is missing: {candidate_id}:{card_id}"
+                )
+                continue
+            expected_ref, expected_sha256 = candidate_sources[candidate_id]
+            sources = store.sources(approved_card.id)
+            if not any(
+                source.source_ref == expected_ref
+                and source.source_sha256 == expected_sha256
+                for source in sources
+            ):
+                errors.append(
+                    f"approved candidate card has wrong evidence: {candidate_id}"
+                )
+    except (OSError, TypeError, ValueError, ConversationLedgerError) as exc:
+        errors.append(str(exc))
+    return ConversationMemoryVerification(
+        ok=not errors,
+        checked_logs=checked_logs,
+        checked_events=checked_events,
+        checked_candidates=checked_candidates,
+        checked_sources=checked_sources,
+        errors=tuple(errors),
+    )
 
 
 class LocalConversationMemory:
@@ -77,6 +289,7 @@ class LocalConversationMemory:
         session_path: Path,
         *,
         store: SQLiteMemoryStore | None = None,
+        semantic_provider: SemanticCandidateProvider | None = None,
     ) -> None:
         self.state_root = Path(state_root).expanduser().resolve()
         self.workspace = Path(workspace).expanduser().resolve()
@@ -85,15 +298,33 @@ class LocalConversationMemory:
             raise ValueError("conversation memory requires a writable store")
         self.store.initialize()
         self.workspace_key = f"sha256:{self._workspace_identity()}"
+        self.semantic_provider = semantic_provider
         self.conversation_id = _digest(
             {"host": "mca-chat", "session_path": str(Path(session_path).resolve())}
         )
         self.events_directory = self.store.directory / "conversations"
-        self._ensure_private_directory(self.events_directory)
+        self.ledger = AuthenticatedConversationLedger(
+            self.events_directory, create=True
+        )
+        self.user_key = f"sha256:{self._user_identity()}"
         self.events_path = self.events_directory / f"{self.conversation_id}.jsonl"
         self.candidates_path = self.events_directory / "candidates.jsonl"
-        self.lock_path = self.events_directory / "conversation-events.lock"
+        self.lock_path = self.ledger.lock_path
+        self.ledger.migrate_legacy(
+            self.events_path,
+            self._event_log_name,
+            self._validate_event_payload,
+        )
+        self.ledger.migrate_legacy(
+            self.candidates_path,
+            "candidates",
+            self._validate_candidate_payload,
+        )
         self._next_sequence = len(self._read_event_rows())
+
+    @property
+    def _event_log_name(self) -> str:
+        return f"events:{self.conversation_id}"
 
     def record_event(
         self,
@@ -123,11 +354,19 @@ class LocalConversationMemory:
                 created_at=_utc_now(),
                 metadata=metadata,
             )
-            self._append_row_unlocked(self.events_path, asdict(event))
+            self.ledger.append_unlocked(
+                self.events_path, self._event_log_name, asdict(event)
+            )
             self._next_sequence = sequence + 1
         return event
 
-    def remember(self, value: str, source_event: ConversationEvent) -> MemoryCard:
+    def remember(
+        self,
+        value: str,
+        source_event: ConversationEvent,
+        *,
+        scope: str = "workspace",
+    ) -> MemoryCard:
         """Persist a user-approved memory bound to its exact chat event."""
 
         return self._remember_from_source(
@@ -135,15 +374,19 @@ class LocalConversationMemory:
             source_ref=source_event.source_ref,
             source_sha256=source_event.source_sha256,
             valid_from=source_event.created_at,
+            scope=scope,
         )
 
-    def remember_candidate(self, selector: str) -> MemoryCard:
+    def remember_candidate(
+        self, selector: str, *, scope: str | None = None
+    ) -> MemoryCard:
         candidate = self._resolve_candidate(selector)
         card = self._remember_from_source(
             candidate.value,
             source_ref=candidate.source_ref,
             source_sha256=candidate.source_sha256,
             valid_from=candidate.created_at,
+            scope=scope or candidate.scope,
         )
         self._append_candidate_decision(candidate.candidate_id, "approved", card.id)
         return card
@@ -194,10 +437,14 @@ class LocalConversationMemory:
         pack = EvidenceTemporalRetriever(
             self.store,
             policy=SCENARIO_POLICIES["personal_assistant"],
+            semantic_provider=self.semantic_provider,
         ).retrieve(
             MemoryQuery(
                 text=query,
-                scopes=(MemoryScope("workspace", self.workspace_key),),
+                scopes=(
+                    MemoryScope("user", self.user_key),
+                    MemoryScope("workspace", self.workspace_key),
+                ),
                 required_authority="none",
                 limit=4,
             )
@@ -208,7 +455,10 @@ class LocalConversationMemory:
 
     def list_memories(self, query: str = "") -> tuple[MemoryCard, ...]:
         cards = self.store.list_cards(
-            scope_pairs=(("workspace", self.workspace_key),),
+            scope_pairs=(
+                ("user", self.user_key),
+                ("workspace", self.workspace_key),
+            ),
             include_global=False,
         )
         if not query.strip():
@@ -258,6 +508,7 @@ class LocalConversationMemory:
             "source_sha256": source_event.source_sha256,
             "source_event_id": source_event.event_id,
             "created_at": source_event.created_at,
+            "scope": "user",
         }
         candidate = ConversationMemoryCandidate(
             candidate_id=_digest(payload), **payload
@@ -268,8 +519,9 @@ class LocalConversationMemory:
                 for item in self.pending_candidates(include_decided=True)
             }
             if candidate.candidate_id not in existing:
-                self._append_row_unlocked(
+                self.ledger.append_unlocked(
                     self.candidates_path,
+                    "candidates",
                     {"record_type": "candidate", **asdict(candidate)},
                 )
         return candidate
@@ -279,7 +531,7 @@ class LocalConversationMemory:
     ) -> tuple[ConversationMemoryCandidate, ...]:
         candidates: dict[str, ConversationMemoryCandidate] = {}
         decided: set[str] = set()
-        for row in self._read_rows(self.candidates_path):
+        for row in self.ledger.read(self.candidates_path, "candidates"):
             if row.get("record_type") == "decision":
                 decided.add(str(row.get("candidate_id", "")))
                 continue
@@ -296,12 +548,20 @@ class LocalConversationMemory:
                     "created_at",
                 )
             }
-            candidate = ConversationMemoryCandidate(**values)
+            scope = str(row.get("scope", "workspace"))
+            candidate = ConversationMemoryCandidate(**values, scope=scope)
             expected = _digest(
-                {key: values[key] for key in values if key != "candidate_id"}
+                {
+                    **{key: values[key] for key in values if key != "candidate_id"},
+                    "scope": scope,
+                }
             )
             if candidate.candidate_id != expected:
-                raise ValueError("conversation memory candidate digest mismatch")
+                legacy_expected = _digest(
+                    {key: values[key] for key in values if key != "candidate_id"}
+                )
+                if candidate.candidate_id != legacy_expected:
+                    raise ValueError("conversation memory candidate digest mismatch")
             candidates[candidate.candidate_id] = candidate
         return tuple(
             candidate
@@ -321,8 +581,12 @@ class LocalConversationMemory:
         source_ref: str,
         source_sha256: str,
         valid_from: str,
+        scope: str,
     ) -> MemoryCard:
         value = self._validate_memory_text(value)
+        if scope not in {"user", "workspace"}:
+            raise ValueError("conversation memory scope must be user or workspace")
+        scope_key = self.user_key if scope == "user" else self.workspace_key
         return self.store.add_card_once_for_source(
             source=EvidenceSource(
                 source_type="conversation_event",
@@ -335,8 +599,8 @@ class LocalConversationMemory:
             cue_anchors=self._cue_anchors(value),
             kind="semantic",
             subtype="explicit_conversation_memory",
-            scope="workspace",
-            scope_key=self.workspace_key,
+            scope=scope,
+            scope_key=scope_key,
             origin="user",
             authority="inform",
             confidence=0.99,
@@ -406,8 +670,9 @@ class LocalConversationMemory:
         self, candidate_id: str, decision: str, card_id: str
     ) -> None:
         with exclusive_file_lock(self.lock_path):
-            self._append_row_unlocked(
+            self.ledger.append_unlocked(
                 self.candidates_path,
+                "candidates",
                 {
                     "record_type": "decision",
                     "candidate_id": candidate_id,
@@ -427,10 +692,34 @@ class LocalConversationMemory:
                 f"mca-workspace:{self.workspace}".encode("utf-8")
             ).hexdigest()
 
+    def _user_identity(self) -> str:
+        path = self.events_directory / USER_IDENTITY_NAME
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            identity = secrets.token_hex(32)
+            try:
+                descriptor = os.open(path, flags, 0o600)
+            except FileExistsError:
+                return self._user_identity()
+            try:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(descriptor, 0o600)
+                os.write(descriptor, identity.encode("ascii"))
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        else:
+            identity = _read_user_identity(path)
+        return hashlib.sha256(f"mca-user:{identity}".encode("ascii")).hexdigest()
+
     def _read_event_rows(self) -> list[dict[str, object]]:
-        rows = self._read_rows(self.events_path)
+        rows = self.ledger.read(self.events_path, self._event_log_name)
         for index, row in enumerate(rows):
-            event = ConversationEvent(**row)
+            event = ConversationEvent(**cast(Any, row))
             recreated = ConversationEvent.create(
                 host_id=event.host_id,
                 conversation_id=event.conversation_id,
@@ -447,10 +736,10 @@ class LocalConversationMemory:
         return rows
 
     def _persisted_next_sequence(self) -> int:
-        row = self._read_last_row(self.events_path)
+        row = self.ledger.last_payload(self.events_path, self._event_log_name)
         if row is None:
             return 0
-        event = ConversationEvent(**row)
+        event = ConversationEvent(**cast(Any, row))
         recreated = ConversationEvent.create(
             host_id=event.host_id,
             conversation_id=event.conversation_id,
@@ -467,89 +756,45 @@ class LocalConversationMemory:
         return event.sequence + 1
 
     @staticmethod
-    def _ensure_private_directory(path: Path) -> None:
-        path.mkdir(mode=0o700, parents=True, exist_ok=True)
-        metadata = path.lstat()
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            raise RuntimeError("conversation memory path must be a real directory")
-        if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
-            raise PermissionError("conversation memory path is not owned by this user")
-        if os.name != "nt":
-            if stat.S_IMODE(metadata.st_mode) & 0o077:
-                raise PermissionError(
-                    "conversation memory path permissions are too broad"
-                )
+    def _validate_event_payload(row: dict[str, object]) -> None:
+        event = ConversationEvent(**cast(Any, row))
+        recreated = ConversationEvent.create(
+            host_id=event.host_id,
+            conversation_id=event.conversation_id,
+            source_ref=event.source_ref,
+            sequence=event.sequence,
+            role=event.role,
+            content=event.content,
+            participant_id=event.participant_id,
+            created_at=event.created_at,
+            metadata=json.loads(event.metadata_json),
+        )
+        if event != recreated:
+            raise ValueError("conversation event log failed integrity validation")
 
     @staticmethod
-    def _read_rows(path: Path) -> list[dict[str, object]]:
-        try:
-            metadata = path.lstat()
-        except FileNotFoundError:
-            return []
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-            raise RuntimeError("conversation memory log must be a regular file")
-        if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
-            raise PermissionError("conversation memory log is not owned by this user")
-        if os.name != "nt" and stat.S_IMODE(metadata.st_mode) & 0o077:
-            raise PermissionError("conversation memory log permissions are too broad")
-        if metadata.st_size > MAX_STATE_FILE_BYTES:
-            raise ValueError("conversation memory log exceeds the state size limit")
-        rows: list[dict[str, object]] = []
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                value = json.loads(line)
-                if not isinstance(value, dict):
-                    raise TypeError("conversation memory log rows must be objects")
-                rows.append(value)
-        return rows
-
-    @staticmethod
-    def _read_last_row(path: Path) -> dict[str, object] | None:
-        try:
-            metadata = path.lstat()
-        except FileNotFoundError:
-            return None
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-            raise RuntimeError("conversation memory log must be a regular file")
-        if metadata.st_size == 0:
-            return None
-        if metadata.st_size > MAX_STATE_FILE_BYTES:
-            raise ValueError("conversation memory log exceeds the state size limit")
-        with path.open("rb") as handle:
-            position = metadata.st_size
-            buffer = b""
-            while position > 0:
-                chunk_size = min(8_192, position)
-                position -= chunk_size
-                handle.seek(position)
-                buffer = handle.read(chunk_size) + buffer
-                lines = buffer.rstrip(b"\n").splitlines()
-                if len(lines) > 1 or position == 0:
-                    value = json.loads(lines[-1].decode("utf-8"))
-                    if not isinstance(value, dict):
-                        raise TypeError("conversation memory log rows must be objects")
-                    return value
-        return None
-
-    @staticmethod
-    def _append_row_unlocked(path: Path, row: dict[str, object]) -> None:
-        payload = (_canonical_json(row) + "\n").encode("utf-8")
-        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        descriptor = os.open(path, flags, 0o600)
-        try:
-            metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode):
-                raise RuntimeError("conversation memory log must be a regular file")
-            if metadata.st_size + len(payload) > MAX_STATE_FILE_BYTES:
-                raise ValueError("conversation memory log exceeds the state size limit")
-            if hasattr(os, "fchmod"):
-                os.fchmod(descriptor, 0o600)
-            view = memoryview(payload)
-            while view:
-                written = os.write(descriptor, view)
-                view = view[written:]
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+    def _validate_candidate_payload(row: dict[str, object]) -> None:
+        if row.get("record_type") == "decision":
+            if not str(row.get("candidate_id", "")):
+                raise ValueError("candidate decision is missing an id")
+            return
+        if row.get("record_type") != "candidate":
+            raise ValueError("unknown conversation candidate record")
+        if row.get("scope", "workspace") not in {"user", "workspace"}:
+            raise ValueError("conversation memory candidate scope is invalid")
+        values = {
+            key: str(row.get(key, ""))
+            for key in (
+                "candidate_id",
+                "value",
+                "source_ref",
+                "source_sha256",
+                "source_event_id",
+                "created_at",
+            )
+        }
+        expected_payload = {key: values[key] for key in values if key != "candidate_id"}
+        if "scope" in row:
+            expected_payload["scope"] = str(row["scope"])
+        if values["candidate_id"] != _digest(expected_payload):
+            raise ValueError("conversation memory candidate digest mismatch")

@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from evals.run_conversation_memory import run_conversation_memory_gate
 from evals.run_memory_comparison import run_comparison
 from evals.run_memory_control import run_control_eval
 from evals.run_memory_evals import run_suite as run_core
@@ -22,13 +23,14 @@ from evals.run_memory_portability import run_portability
 
 
 SCHEMA_VERSION = 1
-SUITE_NAME = "memory-release-v0.5.0"
+SUITE_NAME = "memory-release-v0.6.0"
 
 
 def _source_sha256() -> str:
     paths = (
         Path(__file__),
         Path(run_comparison.__code__.co_filename),
+        Path(run_conversation_memory_gate.__code__.co_filename),
         Path(run_control_eval.__code__.co_filename),
         Path(run_core.__code__.co_filename),
         Path(run_formation.__code__.co_filename),
@@ -72,6 +74,7 @@ def run_release_suite() -> dict[str, Any]:
         ...,
     ] = (
         ("core", run_core, _core_passed),
+        ("conversation_production", run_conversation_memory_gate, _acceptance_passed),
         ("architecture_comparison", run_comparison, _acceptance_passed),
         ("formation", run_formation, _acceptance_passed),
         ("portability", run_portability, _acceptance_passed),
@@ -105,14 +108,17 @@ def run_release_suite() -> dict[str, Any]:
         "harness": {
             "offline": True,
             "model_calls": 0,
-            "python": {"major": sys.version_info.major, "minor": sys.version_info.minor},
+            "python": {
+                "major": sys.version_info.major,
+                "minor": sys.version_info.minor,
+            },
             "platform": platform.system(),
         },
         "results": results,
         "claims_boundary": {
             "measures": (
                 "deterministic storage, retrieval, temporal state, provenance, "
-                "formation, portability, and production-loop wiring"
+                "conversation admission, formation, portability, and production-loop wiring"
             ),
             "does_not_measure": (
                 "open-world model quality, automatic free-conversation extraction, "

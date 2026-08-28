@@ -64,7 +64,7 @@ See [runtime operations](docs/runtime-operations.md) for provider setup, verific
 
 The project includes an evidence-bound local memory foundation:
 immutable cards, append-only temporal status, authenticated
-evidence/edges, SQLite FTS retrieval, and a read-only `mca memory` CLI. It is
+evidence/edges, SQLite FTS retrieval, and an offline `mca memory` management CLI. It is
 disabled for `run`, `chat`, and `tx` by default, so existing behavior and required
 dependencies remain unchanged. Transaction runs can explicitly select `--memory local`;
 the original evidence-temporal retriever then injects only same-workspace advisory context.
@@ -96,10 +96,18 @@ caches derived vectors privately, sees only hard-filtered candidates, and falls 
 original lexical/graph retriever when unavailable.
 
 Interactive chat can opt in with `mca chat --memory local`. Raw user and assistant events
-are appended to private, source-hashed logs; `/remember`, `/correct`, and `/forget` create
-auditable memory changes, while `/memory` inspects active cards and pending candidates.
-Heuristics only stage candidates and `/remember @ID` must approve one before it becomes an
-active card. Recalled text is bounded, source-labelled advisory data and cannot enable tools.
+are appended to private HMAC-chained logs; `/remember` defaults to the current workspace,
+while `--scope user` creates a stable local-user preference available across workspaces.
+`/correct` and `/forget` create auditable temporal changes, while `/memory` inspects active
+cards and pending candidates. Heuristics only stage user-scoped candidates and
+`/remember @ID` must approve one before it becomes active. Optional chat embeddings rerank
+only hard-filtered candidates and fall back to lexical retrieval. Recalled text remains
+bounded, source-labelled advisory data and cannot enable tools.
+
+Offline `mca memory` commands can list, correct, forget, approve, or dismiss records;
+`verify` checks both stores and their evidence links. Verified backup/restore is available,
+and `purge --yes` irreversibly removes the complete local store. Backup archives are
+plaintext sensitive data, not encrypted exports.
 
 In a no-embedding 120-session dialogue diagnostic, retrieval after explicit authenticated
 session ingestion reached 10/10. DeepSeek reading scored 30% from the recent window and 90%
@@ -114,12 +122,12 @@ a traditional three-layer baseline, and the evidence-temporal hybrid:
 .venv/bin/python -m evals.run_memory_comparison
 ```
 
-The v0.5.0 release gate runs all eight deterministic memory suites without a
+The v0.6.0 release gate runs all nine deterministic memory suites without a
 model call and emits one source-bound JSON report:
 
 ```bash
 .venv/bin/python -m evals.run_memory_suite --json \
-  --output /tmp/memory-v0.5.0.json
+  --output /tmp/memory-v0.6.0.json
 ```
 
 Outcome-aware control, automatic durable free-conversation extraction, and chat-format

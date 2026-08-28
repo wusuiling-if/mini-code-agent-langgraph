@@ -8,14 +8,15 @@ from evals.run_memory_suite import main, run_release_suite
 def test_memory_release_suite_runs_all_deterministic_gates() -> None:
     report = run_release_suite()
 
-    assert report["suite"] == "memory-release-v0.5.0"
-    assert report["aggregate"]["suites"] == 8
-    assert report["aggregate"]["passed"] == 8
+    assert report["suite"] == "memory-release-v0.6.0"
+    assert report["aggregate"]["suites"] == 9
+    assert report["aggregate"]["passed"] == 9
     assert report["harness"]["offline"] is True
     assert report["harness"]["model_calls"] == 0
     assert len(report["source_sha256"]) == 64
     assert {result["name"] for result in report["results"]} == {
         "core",
+        "conversation_production",
         "architecture_comparison",
         "formation",
         "portability",

@@ -13,7 +13,7 @@ The project does not implement or host SFT, DPO, reinforcement learning, reward-
 
 ## Production memory boundary
 
-Production memory is opt-in. Transactional coding runs may retrieve bounded, same-project advisory context and form new memories only after an authenticated transaction receipt reaches a successful commit. Interactive chat may use `mca chat --memory local`; it writes private raw event evidence, admits only explicit `/remember` approvals, and represents `/correct` and `/forget` as auditable temporal changes. The read-only `mca memory` commands inspect and verify active and historical cards.
+Production memory is opt-in. Transactional coding runs may retrieve bounded, same-project advisory context and form new memories only after an authenticated transaction receipt reaches a successful commit. Interactive chat may use `mca chat --memory local`; it writes HMAC-chained private raw event evidence, recalls stable local-user and current-workspace scopes, admits only explicit `/remember` approvals, and represents `/correct` and `/forget` as auditable temporal changes. `mca memory` can inspect and verify state, manage memories and candidates offline, export/restore a verified plaintext backup, or explicitly purge the entire store.
 
 Heuristic chat extraction may only create pending candidates and cannot silently admit durable memory. Model-driven automatic admission, SillyTavern/Tavern Helper imports, and the outcome-aware controller remain experimental and cannot be used as evidence for a production quality claim.
 

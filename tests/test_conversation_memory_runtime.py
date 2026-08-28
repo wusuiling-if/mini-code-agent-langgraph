@@ -1,13 +1,27 @@
 from __future__ import annotations
 
+import json
+import shutil
+from dataclasses import asdict
 from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
 from mini_code_agent import cli as cli_module
 from mini_code_agent.chat import TurnResult
 from mini_code_agent.cli import _handle_chat_memory_command, build_parser
-from mini_code_agent.conversation_memory import LocalConversationMemory
+from mini_code_agent.conversation_ledger import ConversationLedgerError
+from mini_code_agent.conversation_memory import (
+    LocalConversationMemory,
+    verify_conversation_memory,
+)
+from mini_code_agent.memory_backup import (
+    export_memory_backup,
+    purge_memory_store,
+    restore_memory_backup,
+)
+from memory_core.conversation import ConversationEvent
 
 
 def _runtime(tmp_path: Path) -> LocalConversationMemory:
@@ -76,8 +90,31 @@ def test_event_log_rejects_content_tampering_on_resume(tmp_path: Path):
     memory.events_path.write_text(payload, encoding="utf-8")
     memory.events_path.chmod(0o600)
 
-    with pytest.raises(ValueError, match="integrity"):
+    with pytest.raises(ConversationLedgerError, match="authentication"):
         _runtime(tmp_path)
+
+
+def test_conversation_verify_rejects_tampered_user_identity(tmp_path: Path):
+    memory = _runtime(tmp_path)
+    memory.record_event("user", "需要长期保存的对话")
+    identity_path = memory.events_directory / "user.identity"
+    identity_path.write_text("invalid", encoding="ascii")
+    identity_path.chmod(0o600)
+
+    verification = verify_conversation_memory(memory.store.directory)
+
+    assert verification.ok is False
+    assert "user identity is invalid" in verification.errors
+
+
+def test_large_event_log_appends_after_authenticated_tail_read(tmp_path: Path):
+    memory = _runtime(tmp_path)
+    first = memory.record_event("user", "甲" * 20_000)
+    second = memory.record_event("assistant", "尾记录")
+
+    assert first.sequence == 0
+    assert second.sequence == 1
+    assert _runtime(tmp_path).record_event("user", "继续").sequence == 2
 
 
 def test_heuristics_only_stage_candidates_until_explicit_approval(tmp_path: Path):
@@ -87,6 +124,7 @@ def test_heuristics_only_stage_candidates_until_explicit_approval(tmp_path: Path
     candidate = memory.stage_candidate(event)
 
     assert candidate is not None
+    assert candidate.scope == "user"
     assert memory.store.status().cards == 0
     assert memory.pending_candidates() == (candidate,)
 
@@ -94,6 +132,7 @@ def test_heuristics_only_stage_candidates_until_explicit_approval(tmp_path: Path
     assert card.value == "我偏好使用深色主题"
     assert memory.pending_candidates() == ()
     assert memory.store.status().cards == 1
+    assert card.scope == "user"
 
 
 def test_secret_like_text_is_neither_staged_nor_remembered(tmp_path: Path):
@@ -150,7 +189,13 @@ def test_chat_injects_recall_as_untrusted_context_when_opted_in(
             self.cwd = Path(cwd)
 
     class FakeMemory:
-        def __init__(self, state_root: Path, workspace: Path, session_path: Path):
+        def __init__(
+            self,
+            state_root: Path,
+            workspace: Path,
+            session_path: Path,
+            **_kwargs,
+        ):
             captured["memory_args"] = (state_root, workspace, session_path)
 
         def record_event(self, role, content, *, metadata=None):
@@ -207,3 +252,205 @@ def test_chat_injects_recall_as_untrusted_context_when_opted_in(
     assert prompt.endswith("我喜欢什么编辑器？")
     assert captured["coding_mode"] is False
     assert captured["closed"] is True
+
+
+def test_user_scope_crosses_workspaces_but_workspace_scope_does_not(tmp_path: Path):
+    first = _runtime(tmp_path)
+    user_event = first.record_event("user", "我偏好简洁回答")
+    workspace_event = first.record_event("user", "这个项目使用 pytest")
+    first.remember("我偏好简洁回答", user_event, scope="user")
+    first.remember("这个项目使用 pytest", workspace_event, scope="workspace")
+
+    other_workspace = tmp_path / "other-workspace"
+    other_workspace.mkdir()
+    second = LocalConversationMemory(
+        tmp_path / "state",
+        other_workspace,
+        tmp_path / "other.chat.json",
+    )
+
+    assert "我偏好简洁回答" in second.recall("我的回答偏好是什么？")
+    assert "pytest" not in second.recall("这个项目使用什么测试框架？")
+
+
+def test_conversation_verify_binds_signed_sources_to_events(tmp_path: Path):
+    memory = _runtime(tmp_path)
+    event = memory.record_event("user", "/remember 使用中文")
+    memory.remember("使用中文", event, scope="user")
+
+    verification = verify_conversation_memory(memory.store.directory)
+
+    assert verification.ok is True
+    assert verification.checked_logs == 1
+    assert verification.checked_events == 1
+    assert verification.checked_sources == 1
+
+    memory.events_path.unlink()
+    missing = verify_conversation_memory(memory.store.directory)
+    assert missing.ok is False
+    assert "does not match authenticated conversation" in missing.errors[0]
+
+
+def test_conversation_verify_rejects_missing_evidence_directory(tmp_path: Path):
+    memory = _runtime(tmp_path)
+    event = memory.record_event("user", "/remember 使用中文")
+    memory.remember("使用中文", event, scope="user")
+    shutil.rmtree(memory.events_directory)
+
+    verification = verify_conversation_memory(memory.store.directory)
+
+    assert verification.ok is False
+    assert verification.errors == ("conversation evidence directory is missing",)
+
+
+def test_legacy_self_hashed_event_log_is_migrated_to_hmac_chain(tmp_path: Path):
+    memory = _runtime(tmp_path)
+    legacy = ConversationEvent.create(
+        host_id="mca-chat",
+        conversation_id=memory.conversation_id,
+        source_ref=f"state:conversation-event:{memory.conversation_id}:0",
+        sequence=0,
+        role="user",
+        content="旧格式事件",
+        participant_id="user",
+        created_at="2026-08-28T00:00:00+00:00",
+    )
+    memory.events_path.write_text(
+        json.dumps(asdict(legacy), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    memory.events_path.chmod(0o600)
+
+    migrated = _runtime(tmp_path)
+    envelope = json.loads(migrated.events_path.read_text(encoding="utf-8"))
+
+    assert envelope["schema_version"] == 2
+    assert len(envelope["hmac_sha256"]) == 64
+    assert envelope["payload"]["content"] == "旧格式事件"
+    assert migrated.record_event("assistant", "继续").sequence == 1
+
+
+def test_full_backup_restore_and_explicit_purge_round_trip(tmp_path: Path):
+    memory = _runtime(tmp_path)
+    event = memory.record_event("user", "/remember 我偏好 Helix")
+    card = memory.remember("我偏好 Helix", event, scope="user")
+    backup = tmp_path / "memory-backup.zip"
+
+    export_memory_backup(memory.store.directory, backup)
+    assert backup.is_file()
+    assert purge_memory_store(memory.store.directory) is True
+    assert not memory.store.directory.exists()
+    restore_memory_backup(backup, memory.store.directory)
+
+    restored = _runtime(tmp_path)
+    assert restored.store.get_card(card.id).value == "我偏好 Helix"
+    assert verify_conversation_memory(restored.store.directory).ok is True
+
+
+def test_backup_refuses_missing_conversation_evidence(tmp_path: Path):
+    memory = _runtime(tmp_path)
+    event = memory.record_event("user", "/remember 使用中文")
+    memory.remember("使用中文", event)
+    shutil.rmtree(memory.events_directory)
+    backup = tmp_path / "invalid.zip"
+
+    with pytest.raises(RuntimeError, match="evidence directory is missing"):
+        export_memory_backup(memory.store.directory, backup)
+
+    assert not backup.exists()
+
+
+def test_restore_rejects_unmanifested_archive_entries(tmp_path: Path):
+    memory = _runtime(tmp_path)
+    event = memory.record_event("user", "/remember 使用中文")
+    memory.remember("使用中文", event)
+    backup = tmp_path / "memory.zip"
+    export_memory_backup(memory.store.directory, backup)
+    with ZipFile(backup, "a", compression=ZIP_DEFLATED) as archive:
+        archive.writestr("memory/../../escape", b"bad")
+    purge_memory_store(memory.store.directory)
+
+    with pytest.raises(ValueError, match="unmanifested"):
+        restore_memory_backup(backup, memory.store.directory)
+    assert not memory.store.directory.exists()
+
+
+def test_memory_cli_management_backup_restore_and_purge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    state = tmp_path / "state"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("MCA_STATE_DIR", str(state))
+    runtime = LocalConversationMemory(state, workspace, tmp_path / "chat.json")
+    event = runtime.record_event("user", "/remember 用户偏好中文")
+    runtime.remember("用户偏好中文", event, scope="user")
+    parser = build_parser()
+
+    listing = parser.parse_args(["memory", "list", "--cwd", str(workspace)])
+    assert cli_module.memory_command(listing) == 0
+    assert "user" in capsys.readouterr().out
+
+    backup = tmp_path / "backup.zip"
+    assert (
+        cli_module.memory_command(parser.parse_args(["memory", "backup", str(backup)]))
+        == 0
+    )
+    assert "plaintext sensitive" in capsys.readouterr().out
+    with pytest.raises(RuntimeError, match="permanent"):
+        cli_module.memory_command(parser.parse_args(["memory", "purge"]))
+    assert (
+        cli_module.memory_command(parser.parse_args(["memory", "purge", "--yes"])) == 0
+    )
+    capsys.readouterr()
+    assert (
+        cli_module.memory_command(parser.parse_args(["memory", "restore", str(backup)]))
+        == 0
+    )
+    assert "restored:" in capsys.readouterr().out
+
+
+def test_memory_cli_list_does_not_initialize_empty_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    state = tmp_path / "empty-state"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("MCA_STATE_DIR", str(state))
+
+    args = build_parser().parse_args(["memory", "list", "--cwd", str(workspace)])
+
+    assert cli_module.memory_command(args) == 0
+    assert "no active user" in capsys.readouterr().out
+    assert not state.exists()
+
+
+def test_chat_memory_can_use_optional_semantic_candidate_provider(tmp_path: Path):
+    class SemanticProvider:
+        def __init__(self):
+            self.queries: list[str] = []
+
+        def rank(self, query, documents, *, limit):
+            self.queries.append(query)
+            return ((documents[0].document_id, 0.99),)
+
+    provider = SemanticProvider()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    memory = LocalConversationMemory(
+        tmp_path / "state",
+        workspace,
+        tmp_path / "chat.json",
+        semantic_provider=provider,
+    )
+    event = memory.record_event("user", "/remember 用户偏好薄荷味")
+    memory.remember("用户偏好薄荷味", event, scope="user")
+
+    context = memory.recall("完全不共享词的询问")
+
+    assert "用户偏好薄荷味" in context
+    assert provider.queries

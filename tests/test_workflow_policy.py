@@ -125,7 +125,9 @@ def _scalar_mapping(node: Node, context: str) -> dict[str, str]:
     }
 
 
-def _workflow_nodes(workflow: str, label: str) -> tuple[dict[str, Node], dict[str, Node]]:
+def _workflow_nodes(
+    workflow: str, label: str
+) -> tuple[dict[str, Node], dict[str, Node]]:
     root = _node_mapping(_compose_workflow(workflow, label), f"{label} root")
     assert "jobs" in root, f"{label} must define jobs"
     jobs = _node_mapping(root["jobs"], f"{label} jobs")
@@ -148,7 +150,9 @@ def _assert_reviewed_action(value_node: Node, context: str) -> None:
     assert match, f"{context} has a mutable or malformed action: {uses_value}"
     action, sha = match.groups()
     assert action in APPROVED_ACTIONS, f"{context} uses unapproved action: {action}"
-    assert sha == APPROVED_ACTIONS[action], f"{context} uses unreviewed SHA for {action}"
+    assert sha == APPROVED_ACTIONS[action], (
+        f"{context} uses unreviewed SHA for {action}"
+    )
 
 
 def _assert_reviewed_action_pins(directory: Path | None = None) -> None:
@@ -177,9 +181,9 @@ def _assert_default_permissions_are_read_only() -> None:
         assert "pull_request_target" not in workflow
         root, jobs = _workflow_nodes(workflow, path.name)
         assert "permissions" in root, f"{path.name} needs top-level permissions"
-        assert _scalar_mapping(
-            root["permissions"], f"{path.name} permissions"
-        ) == {"contents": "read"}, f"{path.name} needs read-only default permissions"
+        assert _scalar_mapping(root["permissions"], f"{path.name} permissions") == {
+            "contents": "read"
+        }, f"{path.name} needs read-only default permissions"
 
         for job_name, job_node in jobs.items():
             job_context = f"{path.name} job {job_name}"
@@ -191,17 +195,19 @@ def _assert_default_permissions_are_read_only() -> None:
                 )
                 continue
             assert "permissions" in job, f"{job_context} needs explicit permissions"
-            assert _scalar_mapping(
-                job["permissions"], f"{job_context} permissions"
-            ) == expected, f"{job_context} permissions must match the approved exception"
+            assert (
+                _scalar_mapping(job["permissions"], f"{job_context} permissions")
+                == expected
+            ), f"{job_context} permissions must match the approved exception"
 
 
 def _assert_codeql_permissions_are_narrow(workflow: str) -> None:
     _, jobs = _workflow_nodes(workflow, "codeql.yml")
     analysis = _node_mapping(jobs["analysis"], "codeql.yml job analysis")
-    assert _scalar_mapping(
-        analysis["permissions"], "codeql.yml job analysis permissions"
-    ) == JOB_PERMISSION_EXCEPTIONS[("codeql.yml", "analysis")]
+    assert (
+        _scalar_mapping(analysis["permissions"], "codeql.yml job analysis permissions")
+        == JOB_PERMISSION_EXCEPTIONS[("codeql.yml", "analysis")]
+    )
 
 
 def _assert_release_permissions_are_narrow(workflow: str) -> None:
@@ -209,9 +215,10 @@ def _assert_release_permissions_are_narrow(workflow: str) -> None:
     build = _node_mapping(jobs["build"], "release.yml job build")
     publish = _node_mapping(jobs["publish"], "release.yml job publish")
     assert "permissions" not in build
-    assert _scalar_mapping(
-        publish["permissions"], "release.yml job publish permissions"
-    ) == JOB_PERMISSION_EXCEPTIONS[("release.yml", "publish")]
+    assert (
+        _scalar_mapping(publish["permissions"], "release.yml job publish permissions")
+        == JOB_PERMISSION_EXCEPTIONS[("release.yml", "publish")]
+    )
 
 
 def _assert_sandbox_triggers_are_exact(trigger_node: Node) -> None:
@@ -220,9 +227,7 @@ def _assert_sandbox_triggers_are_exact(trigger_node: Node) -> None:
         "sandbox.yml must run only on push and pull_request"
     )
     for event in ("push", "pull_request"):
-        event_config = _node_mapping(
-            triggers[event], f"sandbox.yml {event} trigger"
-        )
+        event_config = _node_mapping(triggers[event], f"sandbox.yml {event} trigger")
         assert set(event_config) == {"branches"}, (
             f"sandbox.yml {event} trigger must only select branches"
         )
@@ -285,9 +290,12 @@ def _assert_sandbox_checkout_is_hardened(
     assert set(checkout_step) == {"uses", "with"}, (
         f"sandbox.yml job {job_name} checkout keys must match the approved structure"
     )
-    assert _scalar_value(
-        checkout_step["uses"], f"sandbox.yml job {job_name} checkout uses"
-    ) == checkout
+    assert (
+        _scalar_value(
+            checkout_step["uses"], f"sandbox.yml job {job_name} checkout uses"
+        )
+        == checkout
+    )
     inputs = _node_mapping(
         checkout_step["with"], f"sandbox.yml job {job_name} checkout inputs"
     )
@@ -310,9 +318,12 @@ def _assert_sandbox_setup_python_is_hardened(
     assert set(setup_step) == {"uses", "with"}, (
         f"sandbox.yml job {job_name} setup-python keys must match the approved structure"
     )
-    assert _scalar_value(
-        setup_step["uses"], f"sandbox.yml job {job_name} setup-python uses"
-    ) == setup_python
+    assert (
+        _scalar_value(
+            setup_step["uses"], f"sandbox.yml job {job_name} setup-python uses"
+        )
+        == setup_python
+    )
     assert _scalar_mapping(
         setup_step["with"], f"sandbox.yml job {job_name} setup-python inputs"
     ) == {
@@ -329,15 +340,18 @@ def _assert_sandbox_workflow_is_hardened(workflow: str) -> None:
         assert set(job) == {"runs-on", "timeout-minutes", "steps"}, (
             f"sandbox.yml job {job_name} keys must match the approved structure"
         )
-        assert _scalar_value(
-            job["runs-on"], f"sandbox.yml job {job_name} runs-on"
-        ) == policy["runner"]
+        assert (
+            _scalar_value(job["runs-on"], f"sandbox.yml job {job_name} runs-on")
+            == policy["runner"]
+        )
         timeout = job["timeout-minutes"]
         assert isinstance(timeout, ScalarNode)
         assert timeout.tag == "tag:yaml.org,2002:int"
         assert timeout.value == "15"
         steps = _sandbox_steps(job_name, job)
-        assert len(steps) == 6, f"sandbox.yml job {job_name} must define exactly six steps"
+        assert len(steps) == 6, (
+            f"sandbox.yml job {job_name} must define exactly six steps"
+        )
         _assert_sandbox_checkout_is_hardened(steps[0], job_name)
         _assert_sandbox_setup_python_is_hardened(steps[1], job_name)
         _assert_exact_run_step(
@@ -647,9 +661,7 @@ def test_sandbox_policy_rejects_root_execution_overrides(override):
         ),
         (
             "  pull_request:\n    branches: [main]\n",
-            "  pull_request:\n"
-            "    branches: [main]\n"
-            "  workflow_dispatch:\n",
+            "  pull_request:\n    branches: [main]\n  workflow_dispatch:\n",
         ),
         (
             "  push:\n    branches: [main]\n",
@@ -732,7 +744,7 @@ def test_dependabot_groups_weekly_pip_and_actions_updates():
     assert re.search(r"(?m)^version:\s*2\s*$", dependabot)
     assert dependabot.count('package-ecosystem: "pip"') == 1
     assert dependabot.count('package-ecosystem: "github-actions"') == 1
-    assert dependabot.count("interval: \"weekly\"") == 2
+    assert dependabot.count('interval: "weekly"') == 2
     assert dependabot.count("open-pull-requests-limit: 2") == 2
     assert dependabot.count("groups:") == 2
     assert dependabot.count('patterns: ["*"]') == 2
@@ -740,7 +752,9 @@ def test_dependabot_groups_weekly_pip_and_actions_updates():
 
 
 def test_supply_chain_runs_strict_audit_and_pr_only_dependency_review():
-    assert _required_file("requirements-ci.txt").read_text(encoding="utf-8").splitlines() == [
+    assert _required_file("requirements-ci.txt").read_text(
+        encoding="utf-8"
+    ).splitlines() == [
         "pip==26.2",
         "setuptools==83.0.0",
         "pip-audit==2.10.1",
@@ -812,6 +826,9 @@ def test_release_permissions_and_gates_remain_narrow():
     pytest_gate = "python -m pytest -q"
     runtime_eval_gate = "python -m evals.run_evals --json"
     memory_eval_gate = "python -m evals.run_memory_suite --json"
+    format_gate = "python -m ruff format --check"
+    type_gate = "python -m mypy"
+    coverage_gate = "--cov-fail-under=80"
 
     assert "fetch-depth: 0" in build[build.index(checkout) :].split("- uses:", 1)[0]
     assert ancestry_gate in build
@@ -819,7 +836,15 @@ def test_release_permissions_and_gates_remain_narrow():
     assert build.index(ancestry_gate) < build.index(package_build)
     assert "source version" in build
     assert 'expected = f"v{version}"' in build
-    for gate in (lint_gate, pytest_gate, runtime_eval_gate, memory_eval_gate):
+    for gate in (
+        lint_gate,
+        format_gate,
+        type_gate,
+        pytest_gate,
+        coverage_gate,
+        runtime_eval_gate,
+        memory_eval_gate,
+    ):
         assert gate in build
         assert build.index(gate) < build.index(package_build)
     assert "needs: build" in publish
@@ -832,10 +857,26 @@ def test_tests_workflow_enforces_the_declared_lint_gate():
     pyproject = _required_file("pyproject.toml").read_text(encoding="utf-8")
 
     assert '"ruff>=0.12,<1"' in pyproject
-    assert '[tool.ruff.lint]' in pyproject
+    assert "[tool.ruff.lint]" in pyproject
     assert 'select = ["E4", "E7", "E9", "F"]' in pyproject
     assert "python -m ruff check src tests evals benchmarks" in pytest_job
-    assert pytest_job.index("python -m ruff check") < pytest_job.index("python -m pytest -q")
+    assert pytest_job.index("python -m ruff check") < pytest_job.index(
+        "python -m pytest -q"
+    )
+
+
+def test_tests_workflow_enforces_memory_quality_gates():
+    pytest_job = _job_blocks(_workflow("tests.yml"))["pytest"]
+    pyproject = _required_file("pyproject.toml").read_text(encoding="utf-8")
+
+    assert "fail_under = 80" in pyproject
+    assert "python -m ruff format --check" in pytest_job
+    assert "python -m mypy" in pytest_job
+    assert "--cov-fail-under=80" in pytest_job
+    assert pytest_job.index("python -m ruff format --check") < pytest_job.index(
+        "python -m pytest -q"
+    )
+    assert pytest_job.index("python -m mypy") < pytest_job.index("python -m pytest -q")
 
 
 def test_release_permission_policy_rejects_appended_write_scope():

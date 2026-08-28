@@ -27,7 +27,7 @@ commit 后形成确定性记忆；交互聊天显式使用 `mca chat --memory lo
 在 POSIX 系统上，数据库目录权限为 `0700`，数据库和密钥权限为 `0600`。
 系统会拒绝符号链接、非当前用户所有或权限过宽的状态路径。
 
-## 只读命令
+## 检查与离线管理命令
 
 ```bash
 mca memory status
@@ -37,13 +37,25 @@ mca memory show MEMORY_ID
 mca memory sources MEMORY_ID
 mca memory verify
 mca memory health
+mca memory list --cwd /path/to/repo
+mca memory forget ID_OR_QUERY --cwd /path/to/repo
+mca memory correct ID_OR_QUERY "NEW VALUE" --cwd /path/to/repo
+mca memory candidates list --cwd /path/to/repo
+mca memory candidates approve CANDIDATE_ID --scope user --cwd /path/to/repo
+mca memory candidates dismiss CANDIDATE_ID --cwd /path/to/repo
+mca memory backup /private/path/memory-backup.zip
+mca memory purge --yes
+mca memory restore /private/path/memory-backup.zip
 ```
 
-这些命令不会初始化数据库，也不会写入记录。面向 Runtime 的读写闭环只存在于显式启用的
-事务工作流和 `mca chat --memory local`；普通 `run`、默认聊天和默认事务仍不接触记忆。
+前六个原有检查命令不会初始化数据库，也不会写入记录。`list` 也只读；`forget`、`correct` 和
+`candidates approve/dismiss` 是显式的离线用户变更。`backup` 在导出前验证 SQLite、对话链和跨存储
+证据，生成带文件摘要清单的私有 ZIP；它是明文敏感数据，不是加密备份。`restore` 只恢复到不存在
+的记忆目录，并在安装前重新验证；`purge --yes` 不可逆地删除整套本地记忆、密钥和证据，但不会
+删除外部备份。普通 `run`、默认聊天和默认事务仍不接触记忆。
 
 `mca memory verify` 会检查 SQLite 完整性、所有记录的 HMAC、引用关系、状态事件、
-证据覆盖以及 FTS 索引一致性。校验失败应视为硬错误：在根据原始证据修复或重建前，
+证据覆盖、FTS 索引、对话/候选 HMAC 链，以及候选和卡片到原始事件的证据绑定。校验失败应视为硬错误：在根据原始证据修复或重建前，
 不得继续使用该记忆库。
 
 `mca memory health` 在完整性校验之外，还报告活跃/非活跃卡片、已经到期但状态仍为 active
@@ -81,23 +93,33 @@ mca chat --cwd /path/to/repo --model deepseek --memory local
 启用后可使用：
 
 ```text
-/remember TEXT          明确保存一条记忆
+/remember TEXT          明确保存一条当前 workspace 记忆
+/remember --scope user TEXT       保存跨 workspace 的本地用户记忆
+/remember --scope workspace TEXT  明确保存当前 workspace 记忆
 /correct MEMORY_ID TEXT 用新 revision 替代旧记忆
 /forget ID_OR_QUERY     tombstone 唯一命中的记忆
-/memory [QUERY]         查看当前 workspace 的活跃记忆
+/memory [QUERY]         查看本地用户 + 当前 workspace 的活跃记忆
 /memory candidates      查看自动暂存、尚未批准的候选
-/remember @ID           批准一个候选
+/remember @ID           按候选默认作用域批准（启发式候选默认为 user）
+/remember --scope workspace @ID   以当前 workspace 作用域批准候选
 /memory dismiss ID      放弃一个候选
 ```
 
-每个用户/助手事件都会追加到私有状态目录下的 source-hashed JSONL 日志。活跃记忆仍写入原有
+每个用户/助手事件都会追加到私有状态目录下的 HMAC 链式 JSONL 日志。每行绑定日志名、连续序号、
+前一行 HMAC 和完整 payload；候选及审批决定使用另一条同样认证的链。有效的旧版自摘要日志首次
+打开时会在锁内原子迁移。活跃记忆仍写入原有
 HMAC 认证 SQLite，并绑定原始事件 reference 与 digest；修正保留 supersede 边，遗忘保留
 tombstone 和用户遗忘事件证据。明显凭证不会进入 durable 卡片。原始聊天事件和 trajectory
-本身仍可能敏感，必须按私有状态处理。
+本身仍可能敏感，HMAC 只检测篡改而不加密，必须按私有状态处理。
 
-每轮召回最多 4 条、总计 5,000 字符，只读取同一 workspace（以及既有 global 策略允许的内容）。
+每轮召回最多 4 条、总计 5,000 字符，只读取稳定的本地 user 作用域和当前 workspace 作用域。
 注入块明确标记为带来源但可能过时/错误的历史数据，不能升级 `/ask`、`/code`、shell、写文件或
 验证权限。`/clear` 只清空当前模型上下文；若要移除长期记忆必须使用 `/forget`。
+
+聊天也可传入 `--embedding-base-url` 与 `--embedding-model`，并用
+`--embedding-api-key-env`/`--embedding-timeout` 配置可选的 OpenAI-compatible 语义候选路由。
+该路由只接收已经通过作用域、权限、时态和证据硬过滤的候选；失败时退回词法检索。远程 endpoint
+仍会看到查询和有限候选正文，敏感数据应使用本地/内网服务或保持关闭。
 
 检索会先在 SQLite 中把候选缩到请求作用域和 `global`，再验签每张返回卡及其最新状态事件，
 因此其他项目的历史不会参与当前项目的排序。生产入口在此之前仍执行全库完整性校验；这项

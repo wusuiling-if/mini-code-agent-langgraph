@@ -572,10 +572,54 @@ def build_parser() -> argparse.ArgumentParser:
         command = memory_commands.add_parser(name, help=help_text)
         command.add_argument("memory_id")
     memory_commands.add_parser(
-        "verify", help="Verify SQLite integrity, HMACs, references, and the FTS index."
+        "verify",
+        help=(
+            "Verify SQLite, conversation HMAC chains, references, evidence, "
+            "and the FTS index."
+        ),
     )
     memory_commands.add_parser(
         "health", help="Show integrity, lifecycle debt, scopes, and database size."
+    )
+    memory_list = memory_commands.add_parser(
+        "list", help="List active user and current-workspace memories."
+    )
+    memory_list.add_argument("--cwd", default=".")
+    memory_forget = memory_commands.add_parser(
+        "forget", help="Tombstone one active memory with user evidence."
+    )
+    memory_forget.add_argument("memory_selector")
+    memory_forget.add_argument("--cwd", default=".")
+    memory_correct = memory_commands.add_parser(
+        "correct", help="Supersede one active memory with a user correction."
+    )
+    memory_correct.add_argument("memory_selector")
+    memory_correct.add_argument("value")
+    memory_correct.add_argument("--cwd", default=".")
+    memory_candidates = memory_commands.add_parser(
+        "candidates", help="List, approve, or dismiss pending chat candidates."
+    )
+    memory_candidates.add_argument(
+        "action", choices=["list", "approve", "dismiss"], nargs="?", default="list"
+    )
+    memory_candidates.add_argument("candidate_id", nargs="?")
+    memory_candidates.add_argument("--scope", choices=["user", "workspace"])
+    memory_candidates.add_argument("--cwd", default=".")
+    memory_backup = memory_commands.add_parser(
+        "backup", help="Create a private plaintext full-memory backup."
+    )
+    memory_backup.add_argument("output", type=Path)
+    memory_restore = memory_commands.add_parser(
+        "restore", help="Restore a backup only when no memory store exists."
+    )
+    memory_restore.add_argument("archive", type=Path)
+    memory_purge = memory_commands.add_parser(
+        "purge", help="Permanently delete all local memory and evidence."
+    )
+    memory_purge.add_argument(
+        "--yes",
+        action="store_true",
+        help="Required confirmation for permanent deletion.",
     )
 
     chat = subparsers.add_parser(
@@ -603,9 +647,30 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["off", "local"],
         default="off",
         help=(
-            "Opt in to same-workspace long-term conversation memory. Explicit "
-            "commands write evidence-bound local memories; defaults to off."
+            "Opt in to user- and workspace-scoped long-term conversation memory. "
+            "Explicit commands write evidence-bound local memories; defaults to off."
         ),
+    )
+    chat.add_argument(
+        "--embedding-base-url",
+        default=None,
+        help="Optional OpenAI-compatible embedding API URL for local chat memory.",
+    )
+    chat.add_argument(
+        "--embedding-model",
+        default=None,
+        help="Optional embedding model; requires --memory local and a base URL.",
+    )
+    chat.add_argument(
+        "--embedding-api-key-env",
+        default="MCA_EMBEDDING_API_KEY",
+        help="Environment variable containing the optional embedding API key.",
+    )
+    chat.add_argument(
+        "--embedding-timeout",
+        type=_positive_float,
+        default=30.0,
+        help="Embedding request timeout in seconds.",
     )
     chat.add_argument(
         "--max-steps",
@@ -835,8 +900,8 @@ def run_agent(args: argparse.Namespace) -> int:
 
 def _format_chat_memories(cards: tuple[Any, ...]) -> str:
     if not cards:
-        return "no active same-workspace memories"
-    return "\n".join(f"{card.id[:12]}  {card.value}" for card in cards)
+        return "no active user or current-workspace memories"
+    return "\n".join(f"{card.id[:12]}  {card.scope}  {card.value}" for card in cards)
 
 
 def _handle_chat_memory_command(
@@ -848,12 +913,23 @@ def _handle_chat_memory_command(
     remainder = raw_remainder.strip()
     if command == "/remember":
         if not separator or not remainder:
-            return True, "usage: /remember TEXT or /remember @CANDIDATE_ID"
+            return True, (
+                "usage: /remember [--scope user|workspace] TEXT or "
+                "/remember [--scope user|workspace] @CANDIDATE_ID"
+            )
+        scope = None
+        if remainder.startswith("--scope "):
+            _flag, _space, scoped = remainder.partition(" ")
+            scope_name, value_space, scoped_value = scoped.partition(" ")
+            if scope_name not in {"user", "workspace"} or not value_space:
+                return True, "memory scope must be user or workspace"
+            scope = scope_name
+            remainder = scoped_value.strip()
         if remainder.startswith("@"):
-            card = memory.remember_candidate(remainder)
+            card = memory.remember_candidate(remainder, scope=scope)
         else:
-            card = memory.remember(remainder, source_event)
-        return True, f"remembered {card.id[:12]}: {card.value}"
+            card = memory.remember(remainder, source_event, scope=scope or "workspace")
+        return True, f"remembered {card.id[:12]} ({card.scope}): {card.value}"
     if command == "/forget":
         if not separator or not remainder:
             return True, "usage: /forget MEMORY_ID_OR_QUERY"
@@ -921,11 +997,24 @@ def chat_command(args: argparse.Namespace) -> int:
     if coding_enabled:
         _require_working_sandbox(executor)
     output = _resume_output_path(args.resume, args.output, "chat")
-    conversation_memory = (
-        _load_local_conversation_memory()(_state_root(), cwd, output)
-        if args.memory == "local"
-        else None
-    )
+    embedding_requested = bool(args.embedding_base_url or args.embedding_model)
+    if embedding_requested and args.memory != "local":
+        raise RuntimeError("embedding retrieval requires --memory local")
+    conversation_memory = None
+    if args.memory == "local":
+        from mini_code_agent.memory_adapters.semantic import (
+            semantic_provider_from_args,
+        )
+
+        conversation_memory = _load_local_conversation_memory()(
+            _state_root(),
+            cwd,
+            output,
+            semantic_provider=semantic_provider_from_args(
+                args,
+                state_root=_state_root(),
+            ),
+        )
     access = ChatAccessController(executor, coding_enabled=coding_enabled)
     session = _load_conversational_code_agent()(
         model,
@@ -945,7 +1034,7 @@ def chat_command(args: argparse.Namespace) -> int:
     commands = "/ask, /code, /help, /clear, /exit"
     if conversation_memory is not None:
         commands += ", /remember, /forget, /correct, /memory"
-        print("memory=local (same-workspace, evidence-bound, advisory only)")
+        print("memory=local (user/workspace scoped, evidence-bound, advisory only)")
     print(f"Commands: {commands}")
     try:
         while True:
@@ -961,7 +1050,7 @@ def chat_command(args: argparse.Namespace) -> int:
                 )
                 if conversation_memory is not None:
                     help_text += (
-                        " /remember TEXT stores an explicit memory; /forget ID_OR_QUERY "
+                        " /remember [--scope user|workspace] TEXT stores an explicit memory; /forget ID_OR_QUERY "
                         "tombstones one; /correct ID TEXT supersedes one; /memory [QUERY], "
                         "/memory candidates, and /memory dismiss ID inspect pending/local state."
                     )
@@ -1120,11 +1209,93 @@ def main() -> None:
 
 
 def memory_command(args: argparse.Namespace) -> int:
-    """Read-only phase-1 memory inspection; never initializes state."""
+    """Inspect or explicitly manage the private local memory store."""
 
     from mini_code_agent.memory_store import SQLiteMemoryStore
 
-    store = SQLiteMemoryStore(_state_root() / "memory", read_only=True)
+    memory_directory = _state_root() / "memory"
+    if args.memory_command == "backup":
+        from mini_code_agent.memory_backup import export_memory_backup
+
+        path = export_memory_backup(memory_directory, args.output)
+        print(f"backup: {path}")
+        print(
+            "warning: backup is plaintext sensitive data; protect it like credentials"
+        )
+        return 0
+    if args.memory_command == "restore":
+        from mini_code_agent.memory_backup import restore_memory_backup
+
+        path = restore_memory_backup(args.archive, memory_directory)
+        print(f"restored: {path}")
+        return 0
+    if args.memory_command == "purge":
+        if not args.yes:
+            raise RuntimeError("memory purge is permanent; repeat with --yes")
+        from mini_code_agent.memory_backup import purge_memory_store
+
+        removed = purge_memory_store(memory_directory)
+        print(f"purged: {str(removed).lower()}")
+        print("recovery: impossible unless an external backup exists")
+        return 0
+    if args.memory_command in {"list", "forget", "correct", "candidates"}:
+        from mini_code_agent.conversation_memory import (
+            LocalConversationMemory,
+            list_conversation_memories,
+        )
+
+        cwd = Path(args.cwd).expanduser().resolve()
+        if not cwd.is_dir():
+            raise FileNotFoundError(f"cwd is not a directory: {cwd}")
+        if args.memory_command == "list":
+            print(_format_chat_memories(list_conversation_memories(_state_root(), cwd)))
+            return 0
+        runtime = LocalConversationMemory(
+            _state_root(),
+            cwd,
+            _state_root() / "memory-control.chat.json",
+        )
+        if args.memory_command == "forget":
+            event = runtime.record_event(
+                "user",
+                f"mca memory forget {args.memory_selector}",
+                metadata={"memory_cli_control": True},
+            )
+            card = runtime.forget(args.memory_selector, event)
+            print(f"forgot {card.id}: {card.value}")
+            return 0
+        if args.memory_command == "correct":
+            event = runtime.record_event(
+                "user",
+                f"mca memory correct {args.memory_selector} {args.value}",
+                metadata={"memory_cli_control": True},
+            )
+            old, new = runtime.correct(args.memory_selector, args.value, event)
+            print(f"corrected {old.id} -> {new.id}: {new.value}")
+            return 0
+        if args.action == "list":
+            candidates = runtime.pending_candidates()
+            if not candidates:
+                print("no pending memory candidates")
+            for candidate in candidates:
+                print(
+                    f"@{candidate.candidate_id}\t{candidate.scope}\t{candidate.value}"
+                )
+            return 0
+        if not args.candidate_id:
+            raise RuntimeError("candidate id is required for approve or dismiss")
+        if args.action == "approve":
+            card = runtime.remember_candidate(
+                args.candidate_id,
+                scope=args.scope,
+            )
+            print(f"approved {card.id} ({card.scope}): {card.value}")
+            return 0
+        candidate = runtime.dismiss_candidate(args.candidate_id)
+        print(f"dismissed @{candidate.candidate_id}: {candidate.value}")
+        return 0
+
+    store = SQLiteMemoryStore(memory_directory, read_only=True)
     if args.memory_command == "status":
         status = store.status()
         print(f"initialized: {str(status.initialized).lower()}")
@@ -1226,14 +1397,27 @@ def memory_command(args: argparse.Namespace) -> int:
         )
         return 0 if health.verification_ok else 1
     verification = store.verify()
-    print(f"ok: {str(verification.ok).lower()}")
+    from mini_code_agent.conversation_memory import verify_conversation_memory
+
+    conversation_verification = verify_conversation_memory(_state_root() / "memory")
+    combined_ok = verification.ok and conversation_verification.ok
+    print(f"ok: {str(combined_ok).lower()}")
     print(f"checked.cards: {verification.checked_cards}")
     print(f"checked.sources: {verification.checked_sources}")
     print(f"checked.edges: {verification.checked_edges}")
     print(f"checked.events: {verification.checked_events}")
+    print(f"checked.conversation_logs: {conversation_verification.checked_logs}")
+    print(f"checked.conversation_events: {conversation_verification.checked_events}")
+    print(
+        "checked.conversation_candidates: "
+        f"{conversation_verification.checked_candidates}"
+    )
+    print(f"checked.conversation_sources: {conversation_verification.checked_sources}")
     for error in verification.errors:
         print(f"error: {error}")
-    return 0 if verification.ok else 1
+    for error in conversation_verification.errors:
+        print(f"error: {error}")
+    return 0 if combined_ok else 1
 
 
 def trace_command(args: argparse.Namespace) -> int:
