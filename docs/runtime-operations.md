@@ -41,10 +41,29 @@ mca chat \
   --cwd /path/to/repo \
   --model deepseek \
   --provider deepseek \
+  --memory local \
   --check tests "pytest -q"
 ```
 
 `mca run` requires an explicit model and authoritative verification. `mca chat` starts in read-only `/ask` mode; enter `/code` only after starting it with `--test-command` or `--check`. `--yes` skips confirmations but never grants code mode by itself.
+
+`--memory local` is a separate opt-in and does not grant code authority. It enables
+same-workspace recall and these local controls:
+
+```text
+/remember TEXT          Store one explicit source-bound memory
+/correct MEMORY_ID TEXT Supersede an active memory with a new revision
+/forget ID_OR_QUERY     Tombstone exactly one matched memory
+/memory [QUERY]         List active same-workspace memories
+/memory candidates      List heuristic candidates awaiting approval
+/remember @ID           Approve one pending candidate
+/memory dismiss ID      Dismiss one pending candidate
+```
+
+Raw chat events and candidate decisions live under the private state directory.
+Obvious credentials are refused for durable storage. Heuristics never admit a card
+directly, and recalled content is bounded, provenance-bearing advisory data rather
+than instructions or tool permission.
 
 Named checks execute serially in declaration order. They must all begin and end against one unchanged workspace fingerprint:
 

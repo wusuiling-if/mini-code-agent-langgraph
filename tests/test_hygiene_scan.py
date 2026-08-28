@@ -90,3 +90,10 @@ def test_current_docs_describe_legacy_and_named_verification_configuration():
     assert "provider, test command, sandbox" not in security
     assert "configured test command is an authoritative check" not in security
     assert "legacy `--test-command` or named `--check`" in security
+
+
+def test_private_harbor_runtime_and_artifacts_are_ignored():
+    patterns = set((ROOT / ".gitignore").read_text(encoding="utf-8").splitlines())
+
+    assert "/.harbor-venv/" in patterns
+    assert "/artifacts/" in patterns

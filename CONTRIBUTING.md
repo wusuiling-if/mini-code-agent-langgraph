@@ -26,7 +26,10 @@ python -m pip install -U pip
 python -m pip install -e ".[dev]"
 ```
 
-Native Windows is tested only for informational CLI/configuration paths. Use WSL2/Linux for `run`, `chat`, `demo`, structured file tools, and isolated command execution in `0.3.x`.
+Native Windows supports the informational CLI, structured file tools, transactions,
+and both no-key demos. Local commands use `cmd.exe`; strong command isolation requires
+Docker, while `--sandbox none` is an explicit unisolated opt-out. WSL2 remains the
+recommended environment for repositories and checks that require POSIX behavior.
 
 ## Local validation
 
@@ -34,20 +37,29 @@ Run the complete deterministic checks from macOS, Linux, or WSL2 before opening 
 
 ```bash
 pytest -q
+ruff check src tests evals benchmarks
 python -m pip check
 python -m evals.run_evals --json
+python -m evals.run_memory_suite --json
 mca doctor --sandbox none
-mca demo  # macOS, Linux, or WSL2
+mca demo
+mca tx demo
 ```
 
-`mca doctor --sandbox none` intentionally reports an isolation warning; it is a read-only configuration smoke test. `mca demo` uses a temporary, credential-free workspace and does not call a model provider; skip it on native Windows and run it from WSL2 instead.
+`mca doctor --sandbox none` intentionally reports an isolation warning; it is a
+read-only configuration smoke test. Both demos use temporary, credential-free
+workspaces and do not call a model provider.
 
-Native Windows validation is limited to the informational surface:
+On native Windows, additionally exercise the platform-specific transaction and
+command paths:
 
 ```powershell
 mca --version
 mca --help
 mca doctor --sandbox none
+python -m pytest -q tests/test_windows_compat.py tests/test_transaction.py
+mca demo
+mca tx demo
 ```
 
 For a focused change, run the smallest relevant test first, then the full suite. Tests should use `tmp_path`, the scripted/mock model, and disposable credentials. Unit and default CI tests must not require network access, a real API key, a running Docker daemon, or modification of `examples/`.
@@ -74,7 +86,9 @@ Do not commit API keys, `.env` files, private trajectories, Undo journals, fixtu
 - Do not silently turn a failed security check into an unisolated fallback.
 - Treat trajectories as sensitive even after best-effort redaction, and keep reversible source content in the private authenticated journal.
 
-There is currently no mandatory formatter or type checker configuration. Avoid unrelated formatting churn and make the patch easy to audit.
+Ruff's correctness-oriented lint rules are mandatory and run in CI. There is not
+yet a mandatory formatter or type checker configuration. Avoid unrelated formatting
+churn and make the patch easy to audit.
 
 ## Security review
 

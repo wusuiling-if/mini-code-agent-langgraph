@@ -808,6 +808,10 @@ def test_release_permissions_and_gates_remain_narrow():
     checkout = f"actions/checkout@{APPROVED_ACTIONS['actions/checkout']}"
     ancestry_gate = "git merge-base --is-ancestor HEAD origin/main"
     package_build = "python -m build --sdist --wheel"
+    lint_gate = "python -m ruff check src tests evals benchmarks"
+    pytest_gate = "python -m pytest -q"
+    runtime_eval_gate = "python -m evals.run_evals --json"
+    memory_eval_gate = "python -m evals.run_memory_suite --json"
 
     assert "fetch-depth: 0" in build[build.index(checkout) :].split("- uses:", 1)[0]
     assert ancestry_gate in build
@@ -815,9 +819,23 @@ def test_release_permissions_and_gates_remain_narrow():
     assert build.index(ancestry_gate) < build.index(package_build)
     assert "source version" in build
     assert 'expected = f"v{version}"' in build
+    for gate in (lint_gate, pytest_gate, runtime_eval_gate, memory_eval_gate):
+        assert gate in build
+        assert build.index(gate) < build.index(package_build)
     assert "needs: build" in publish
     assert "actions/download-artifact@" in publish
     _assert_release_permissions_are_narrow(workflow)
+
+
+def test_tests_workflow_enforces_the_declared_lint_gate():
+    pytest_job = _job_blocks(_workflow("tests.yml"))["pytest"]
+    pyproject = _required_file("pyproject.toml").read_text(encoding="utf-8")
+
+    assert '"ruff>=0.12,<1"' in pyproject
+    assert '[tool.ruff.lint]' in pyproject
+    assert 'select = ["E4", "E7", "E9", "F"]' in pyproject
+    assert "python -m ruff check src tests evals benchmarks" in pytest_job
+    assert pytest_job.index("python -m ruff check") < pytest_job.index("python -m pytest -q")
 
 
 def test_release_permission_policy_rejects_appended_write_scope():
