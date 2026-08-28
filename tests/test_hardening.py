@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-import mini_code_agent.agent as agent_module
 import mini_code_agent.cli as cli_module
 import mini_code_agent.executor as executor_module
 import mini_code_agent.trajectory as trajectory_module

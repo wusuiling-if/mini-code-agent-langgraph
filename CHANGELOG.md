@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Added
 
+- Added opt-in long-term conversation memory for `mca chat --memory local`, including private immutable event logs, bounded same-workspace recall, evidence-bearing `/remember`, auditable `/forget` and `/correct`, and heuristic candidates that require explicit approval before becoming durable memory.
 - Added content-free transaction recovery audits with per-attempt duration, step and workspace progress, failure class/cause types, verification state, and cumulative resume summaries. Harbor metadata now separates successful model calls from attempted and failed model requests.
 - Added explicit `--streaming` and `--reasoning-effort` model transport controls. Transaction manifests pin both values across resume, and OpenAI-compatible runs remain on Chat Completions.
 - Added a fixed-model Harbor transport preflight that requires a long-context streamed tool call before paid execution, plus a mini-swe-agent streaming shim so both comparison arms use Chat Completions with the same reasoning effort.
@@ -14,6 +15,16 @@ All notable changes to this project are documented in this file. The format foll
 
 - Avoided appending duplicate resume notices when a model request fails before producing a new checkpoint, keeping repeated connection recovery context bounded without weakening fresh-verification requirements.
 - Avoided the proxy's stalled non-streaming route and its incompatible Responses API route in the pinned Harbor comparison.
+
+### Changed
+
+- Added a correctness-oriented Ruff gate to contributor and release CI, and made the release workflow rerun the full test suite plus both deterministic evaluation gates before building artifacts.
+- Updated the supported-security-version and native Windows contributor guidance for the current 0.5.x runtime.
+
+### Security
+
+- Kept recalled conversation memory advisory and unable to grant tool authority, rejected obvious credentials from durable admission, and prevented heuristic extraction from silently writing active memory.
+- Kept private Harbor environments and raw benchmark artifacts out of the source worktree by default to reduce accidental publication of sensitive prompts, trajectories, and workspace data.
 
 ## [0.5.0] - 2026-08-26
 

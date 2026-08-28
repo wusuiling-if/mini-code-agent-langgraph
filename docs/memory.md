@@ -1,8 +1,9 @@
 # 证据约束的通用记忆（显式启用）
 
 记忆基础设施默认与 Agent Runtime 隔离。`run`、`chat` 和默认的 `tx` 不会读取或写入记忆，
-也没有新增必需依赖；只有事务显式使用 `--memory local` 时才会读取同一 workspace 的记忆，
-并在成功 commit 后形成确定性记忆。
+也没有新增必需依赖。事务显式使用 `--memory local` 时会读取同一 workspace 的记忆，并在成功
+commit 后形成确定性记忆；交互聊天显式使用 `mca chat --memory local` 时会记录来源事件，并只
+通过用户确认命令写入 durable 记忆。
 这样可以让第一阶段保持可逆，并确保默认行为不变。
 
 ## 存储与信任模型
@@ -39,7 +40,7 @@ mca memory health
 ```
 
 这些命令不会初始化数据库，也不会写入记录。面向 Runtime 的读写闭环只存在于显式启用的
-事务工作流；普通 `run`、`chat` 和默认事务仍不接触记忆。
+事务工作流和 `mca chat --memory local`；普通 `run`、默认聊天和默认事务仍不接触记忆。
 
 `mca memory verify` 会检查 SQLite 完整性、所有记录的 HMAC、引用关系、状态事件、
 证据覆盖以及 FTS 索引一致性。校验失败应视为硬错误：在根据原始证据修复或重建前，
@@ -67,8 +68,36 @@ mca memory health
 有效且至少具有 `inform` 权限的卡片，并把带来源的有限上下文包注入 Agent。成功 commit 后，
 Runtime 从认证 receipt 形成验证流程程序记忆，并从 receipt 绑定的 `prepared.patch` 自动形成
 一条 `verified_repair` 情景经验；默认仍为 `off`。二进制、超过 200 KB 或疑似包含凭证的补丁
-不会写入经验正文。目前不从自由对话抽取，默认没有 embedding，更不会让记忆授权 Agent
-执行操作。
+不会写入经验正文。聊天路径只接受 `/remember` 或 `/remember @候选ID` 的显式准入；偏好式
+自由文本最多暂存为待审批候选，不会自动成为 active 卡片。默认没有 embedding，更不会让
+记忆授权 Agent 执行操作。
+
+## 交互聊天长期记忆
+
+```bash
+mca chat --cwd /path/to/repo --model deepseek --memory local
+```
+
+启用后可使用：
+
+```text
+/remember TEXT          明确保存一条记忆
+/correct MEMORY_ID TEXT 用新 revision 替代旧记忆
+/forget ID_OR_QUERY     tombstone 唯一命中的记忆
+/memory [QUERY]         查看当前 workspace 的活跃记忆
+/memory candidates      查看自动暂存、尚未批准的候选
+/remember @ID           批准一个候选
+/memory dismiss ID      放弃一个候选
+```
+
+每个用户/助手事件都会追加到私有状态目录下的 source-hashed JSONL 日志。活跃记忆仍写入原有
+HMAC 认证 SQLite，并绑定原始事件 reference 与 digest；修正保留 supersede 边，遗忘保留
+tombstone 和用户遗忘事件证据。明显凭证不会进入 durable 卡片。原始聊天事件和 trajectory
+本身仍可能敏感，必须按私有状态处理。
+
+每轮召回最多 4 条、总计 5,000 字符，只读取同一 workspace（以及既有 global 策略允许的内容）。
+注入块明确标记为带来源但可能过时/错误的历史数据，不能升级 `/ask`、`/code`、shell、写文件或
+验证权限。`/clear` 只清空当前模型上下文；若要移除长期记忆必须使用 `/forget`。
 
 检索会先在 SQLite 中把候选缩到请求作用域和 `global`，再验签每张返回卡及其最新状态事件，
 因此其他项目的历史不会参与当前项目的排序。生产入口在此之前仍执行全库完整性校验；这项
@@ -167,10 +196,11 @@ trajectory 逐项核对，然后由 Runtime 固定以下字段：
 初始化记忆库之前失败。底层 `SQLiteMemoryStore.add_card()` 仍用于测试、迁移和内部基础设施，
 不应成为未来抽取器或模型工具的直接入口。
 
-当前网关只覆盖经过验证的事务流程和实现补丁。补丁经验固定为 workspace 作用域、
+事务准入网关覆盖经过验证的事务流程和实现补丁；对话桥则是独立的用户来源准入器，只允许
+显式命令确认，不能伪装为 transaction receipt。补丁经验固定为 workspace 作用域、
 `trusted_tool/inform`，正文来自经过摘要核对的 prepared patch，任务 cue 由中英文词法规则自动
-生成；同一 receipt 重放具有原子幂等性。用户陈述、外部资料和普通 Agent 观察需要各自的来源
-解析器，不能通过伪装成 transaction receipt 接入。
+生成；同一 receipt 重放具有原子幂等性。外部资料和普通 Agent 观察仍需要各自的来源解析器，
+不能通过伪装成 transaction receipt 或用户确认命令接入。
 
 验证命令正文不会写入 trajectory、receipt 或记忆。Runtime 只把命令 SHA-256 纳入持久化
 验证证据，用于证明 receipt 中的检查名称绑定到实际配置；自动生成的卡片只记录检查名称和

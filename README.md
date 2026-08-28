@@ -64,8 +64,8 @@ See [runtime operations](docs/runtime-operations.md) for provider setup, verific
 
 The project includes an evidence-bound local memory foundation:
 immutable cards, append-only temporal status, authenticated
-evidence/edges, SQLite FTS retrieval, and a read-only `mca memory` CLI. It is not
-connected to `run`, `chat`, or `tx` by default, so existing behavior and required
+evidence/edges, SQLite FTS retrieval, and a read-only `mca memory` CLI. It is
+disabled for `run`, `chat`, and `tx` by default, so existing behavior and required
 dependencies remain unchanged. Transaction runs can explicitly select `--memory local`;
 the original evidence-temporal retriever then injects only same-workspace advisory context.
 After a successful commit, the runtime records both the authenticated verification workflow
@@ -95,11 +95,17 @@ local/private model server, so local model deployment is not required. It is off
 caches derived vectors privately, sees only hard-filtered candidates, and falls back to the
 original lexical/graph retriever when unavailable.
 
+Interactive chat can opt in with `mca chat --memory local`. Raw user and assistant events
+are appended to private, source-hashed logs; `/remember`, `/correct`, and `/forget` create
+auditable memory changes, while `/memory` inspects active cards and pending candidates.
+Heuristics only stage candidates and `/remember @ID` must approve one before it becomes an
+active card. Recalled text is bounded, source-labelled advisory data and cannot enable tools.
+
 In a no-embedding 120-session dialogue diagnostic, retrieval after explicit authenticated
 session ingestion reached 10/10. DeepSeek reading scored 30% from the recent window and 90%
 from both full history and evidence-temporal memory, while the memory path averaged 342 context
-characters. This does not test automatic conversation extraction, which production `mca chat`
-does not yet implement.
+characters. This diagnostic predates the production chat bridge and still measures explicit
+ingestion rather than the new pending-candidate heuristic.
 
 The deterministic cross-domain ablation compares no memory, pure top-k recall,
 a traditional three-layer baseline, and the evidence-temporal hybrid:
@@ -116,7 +122,7 @@ model call and emits one source-bound JSON report:
   --output /tmp/memory-v0.5.0.json
 ```
 
-Outcome-aware control, automatic free-conversation extraction, and chat-format
+Outcome-aware control, automatic durable free-conversation extraction, and chat-format
 imports remain experiments. See [project scope](docs/project-scope.md) for the
 production and evaluation boundary.
 

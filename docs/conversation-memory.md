@@ -149,7 +149,27 @@ files, hide messages, install a browser extension, or write candidate values
 to durable memory automatically. This keeps migration preview reversible while
 the schema mapping is reviewed and tested.
 
-## Next integration boundary
+## MCA integration
+
+`mca chat --memory local` implements the first production host bridge:
+
+- user and assistant turns are appended as immutable `ConversationEvent` rows in
+  the private state directory;
+- explicit `/remember` writes a same-workspace semantic card bound to that event's
+  source reference and digest;
+- `/correct` creates a superseding revision and `/forget` appends a tombstone plus
+  the user's forget-event evidence;
+- retrieval uses the existing evidence-temporal policy and a 5,000-character,
+  four-item prompt budget;
+- simple preference-like statements may become pending candidates, but only
+  `/remember @ID` can admit one to durable memory.
+
+The bridge rejects obvious credentials, leaves memory off by default, and labels
+retrieval as fallible historical data that cannot grant tool authority. `/clear`
+only clears the model's current context; it deliberately does not erase durable
+memory. Use `/forget` for that.
+
+## Further integration boundary
 
 A host integration only needs to implement four actions:
 
@@ -158,8 +178,8 @@ A host integration only needs to implement four actions:
 3. run a summary/candidate producer when `plan_formation` says a batch is due;
 4. place `PromptInjection` according to the host's prompt API.
 
-For SillyTavern, those actions can sit behind its extension event API. For MCA,
-they can sit behind `mca chat --memory local`. A web service can expose the same
+For SillyTavern, those actions can sit behind its extension event API. MCA now
+implements them in its terminal chat host. A web service can expose the same
 operations over JSON without either host dependency.
 
 ## References and licensing boundary

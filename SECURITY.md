@@ -8,10 +8,10 @@ mini-code-agent-langgraph is a compact reference runtime for studying and extend
 
 | Version | Security fixes |
 | --- | --- |
-| `0.3.x` | Supported |
-| `0.2.x` and earlier | Not supported |
+| `0.5.x` | Supported |
+| `0.4.x` and earlier | Not supported |
 
-Security fixes are applied to the latest `0.3.x` release. Older trajectory and Undo formats may be readable for inspection, but unsafe legacy Undo data is not trusted for writes unless the user explicitly opts in.
+Security fixes are applied to the latest `0.5.x` release. Older trajectory and Undo formats may be readable for inspection, but unsafe legacy Undo data is not trusted for writes unless the user explicitly opts in.
 
 ## Reporting a vulnerability
 

@@ -56,8 +56,12 @@ jobs:
             exit 1
           fi
       - run: python -m pip install build twine
-      - run: python -m pip install -e .
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m ruff check src tests evals benchmarks
+      - run: python -m pytest -q
+      - run: python -m evals.run_evals --json --output artifacts/evals/v0.3.2.json
       - run: python -m evals.run_memory_suite --json --output artifacts/evals/memory-v0.5.0.json
+      - run: python -m pip check
       - run: python -m build --sdist --wheel
       - run: python -m twine check dist/*
       - name: Verify source distribution assets
