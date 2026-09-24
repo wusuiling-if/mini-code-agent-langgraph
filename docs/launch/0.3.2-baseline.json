@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-21T14:47:07+08:00",
+  "capture_phase": "after_github_canonical_launch_before_third_party_post",
+  "third_party_post_published": false,
+  "repository": {
+    "stars": 0,
+    "forks": 0,
+    "subscribers": 0,
+    "github_open_issues_count_including_pull_requests": 1,
+    "open_issues": 0,
+    "open_pull_requests": 1,
+    "has_discussions": true,
+    "homepage": "https://pypi.org/project/mini-code-agent-langgraph/0.3.2/"
+  },
+  "traffic_rolling_14_days": {
+    "views": 14,
+    "unique_visitors": 14,
+    "clones": 210,
+    "unique_cloners": 39,
+    "views_daily": [
+      {"timestamp": "2026-07-07T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-08T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-09T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-10T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-11T00:00:00Z", "count": 1, "uniques": 1},
+      {"timestamp": "2026-07-12T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-13T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-14T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-15T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-16T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-17T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-18T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-19T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-20T00:00:00Z", "count": 13, "uniques": 13}
+    ],
+    "clones_daily": [
+      {"timestamp": "2026-07-07T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-08T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-09T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-10T00:00:00Z", "count": 13, "uniques": 13},
+      {"timestamp": "2026-07-11T00:00:00Z", "count": 2, "uniques": 2},
+      {"timestamp": "2026-07-12T00:00:00Z", "count": 1, "uniques": 1},
+      {"timestamp": "2026-07-13T00:00:00Z", "count": 1, "uniques": 1},
+      {"timestamp": "2026-07-14T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-15T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-16T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-17T00:00:00Z", "count": 1, "uniques": 1},
+      {"timestamp": "2026-07-18T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-19T00:00:00Z", "count": 0, "uniques": 0},
+      {"timestamp": "2026-07-20T00:00:00Z", "count": 192, "uniques": 26}
+    ],
+    "popular_referrers": []
+  },
+  "feedback": {
+    "discussion_number": 4,
+    "discussion_comments": 0
+  },
+  "interpretation": {
+    "purpose": "Measure change after the canonical GitHub launch and any later third-party promotion.",
+    "clone_metric_boundary": "Clones and unique cloners are GitHub traffic signals, not verified users, installs, or active adoption.",
+    "traffic_caveat": "GitHub traffic is a rolling 14-day window and may be delayed or privacy-aggregated."
+  },
+  "next_comparison_at": "2026-07-28T14:47:07+08:00"
+}
